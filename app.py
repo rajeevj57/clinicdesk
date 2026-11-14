@@ -242,8 +242,8 @@ def log_visit(patient_id):
                 file_path = f"visit_{visit_id}_{filename}"
                 file_bytes = file.read()
 
-                supabase.storage.from_('prescriptions').upload(file_path, file_bytes, {"content-type": file.content_type})
-                public_url = supabase.storage.from_('prescriptions').get_public_url(file_path)
+                supabase.storage.from_('PRESCRIPTIONS').upload(file_path, file_bytes, {"content-type": file.content_type})
+                public_url = supabase.storage.from_('PRESCRIPTIONS').get_public_url(file_path)
 
                 supabase.table('prescriptions').insert({
                     "visit_id": visit_id,
