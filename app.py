@@ -7,7 +7,7 @@ app = Flask(__name__)
 
 # ClinicDesk Supabase Credentials
 SUPABASE_URL = "https://pfmldhpidblncypuagld.supabase.co"
-SUPABASE_KEY = "sb_publishable_keJl_7oF2rh7VeSPKF10kw_ryo"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBmbWxkaHBpZGJsbmN5cHVhZ2xkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ2NTM2MjEsImV4cCI6MjExMDIyOTYyMX0.SI7i2c5IeGwP3T3qi0GaCEPU-WUeRFP2T4oh0Ioun0c"
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Single unified template wrapper
