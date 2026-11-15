@@ -184,23 +184,36 @@ def patient_profile(patient_id):
     visit_cards = ""
     if visits:
         for v in visits:
-            rx_btn = ""
+            visit_date = v.get('visit_date', v.get('created_at', ''))[:10]
+            rx_section = ""
             if v.get('prescriptions'):
                 rx_url = v['prescriptions'][0]['prescription_url']
-                rx_btn = f'<a href="{rx_url}" target="_blank" class="btn btn-sm btn-outline-dark ms-2">View Prescription Image 📄</a>'
+                rx_section = f'''
+                <div class="mt-3">
+                    <span class="d-block text-muted small mb-1">Prescription Image:</span>
+                    <a href="{rx_url}" target="_blank">
+                        <img src="{rx_url}" alt="Prescription" class="img-thumbnail" style="max-height: 150px; object-fit: contain;">
+                    </a>
+                    <div class="mt-1">
+                        <a href="{rx_url}" target="_blank" class="text-decoration-none small">🔍 View Full Image</a>
+                    </div>
+                </div>
+                '''
             
             visit_cards += f"""
-            <div class="card shadow-sm mb-3 p-3">
-                <div class="d-flex justify-content-between">
-                    <h5 class="text-secondary">Visit Date: {v['visit_date']}</h5>
-                    <span class="badge bg-info text-dark">{v.get('diagnosis_tags', '')}</span>
+            <div class="card shadow-sm mb-3">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h6 class="text-primary fw-bold mb-0">Visit Date: {visit_date}</h6>
+                        <span class="badge bg-info text-dark">{v.get('diagnosis_tags', '')}</span>
+                    </div>
+                    <p class="mt-2 mb-2"><strong>Notes:</strong> {v.get('notes', 'No notes recorded.')}</p>
+                    {rx_section}
                 </div>
-                <p class="mt-2 mb-2"><strong>Notes:</strong> {v.get('notes', '')}</p>
-                <div class="mt-2"><strong>Prescription:</strong> {rx_btn}</div>
             </div>
             """
     else:
-        visit_cards = '<div class="card shadow-sm p-4 text-center text-muted">No consultation history recorded yet.</div>'
+        visit_cards = '<div class="alert alert-info text-center">No consultation history recorded yet.</div>'
 
     body = f"""
     <div class="row">
