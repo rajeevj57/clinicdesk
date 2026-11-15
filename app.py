@@ -1,17 +1,37 @@
 import os
-from flask import Flask, redirect, render_template_string, request, url_for
+from functools import wraps
+from flask import Flask, redirect, render_template_string, request, session, url_for
 from supabase import Client, create_client
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
+app.secret_key = "clinicdesk_secure_random_secret_key"
 
 # ClinicDesk Supabase Credentials
 SUPABASE_URL = "https://pfmldhpidblncypuagld.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBmbWxkaHBpZGJsbmN5cHVhZ2xkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ2NTM2MjEsImV4cCI6MjExMDIyOTYyMX0.SI7i2c5IeGwP3T3qi0GaCEPU-WUeRFP2T4oh0Ioun0c"
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# Authentication Decorator
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user' not in session:
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
 # Single unified template wrapper
 def render_page(body_content, **kwargs):
+    nav_links = ""
+    if 'user' in session:
+        nav_links = f"""
+            <a href="/" class="btn btn-outline-light btn-sm me-2">Home</a>
+            <a href="/search" class="btn btn-outline-light btn-sm me-2">Search Patients</a>
+            <a href="/register" class="btn btn-outline-light btn-sm me-2">Register Patient</a>
+            <a href="/logout" class="btn btn-danger btn-sm">Logout</a>
+        """
+    
     html = f"""
     <!DOCTYPE html>
     <html lang="en">
@@ -25,9 +45,7 @@ def render_page(body_content, **kwargs):
             <div class="container">
                 <a class="navbar-brand fw-bold" href="/">🏥 ClinicDesk</a>
                 <div>
-                    <a href="/" class="btn btn-outline-light btn-sm me-2">Home</a>
-                    <a href="/search" class="btn btn-outline-light btn-sm me-2">Search Patients</a>
-                    <a href="/register" class="btn btn-light btn-sm">Register Patient</a>
+                    {nav_links}
                 </div>
             </div>
         </nav>
@@ -39,7 +57,58 @@ def render_page(body_content, **kwargs):
     """
     return render_template_string(html, **kwargs)
 
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    error = None
+    if request.method == 'POST':
+        email = request.form.get('email')
+        password = request.form.get('password')
+        
+        try:
+            response = supabase.auth.sign_in_with_password({
+                "email": email,
+                "password": password
+            })
+            if response.user:
+                session['user'] = email
+                return redirect(url_for('index'))
+        except Exception as e:
+            error = "Invalid email or password. Please verify your Supabase Auth credentials."
+
+    body = f"""
+    <div class="row justify-content-center mt-5">
+        <div class="col-md-5">
+            <div class="card shadow-sm p-4">
+                <h3 class="mb-3 text-primary text-center">🏥 ClinicDesk Login</h3>
+                {f'<div class="alert alert-danger">{error}</div>' if error else ''}
+                <form method="POST">
+                    <div class="mb-3">
+                        <label class="form-label">Doctor / Staff Email</label>
+                        <input type="email" name="email" class="form-control" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Password</label>
+                        <input type="password" name="password" class="form-control" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100">Login to ClinicDesk</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    """
+    return render_page(body)
+
+@app.route('/logout')
+def logout():
+    session.pop('user', None)
+    try:
+        supabase.auth.sign_out()
+    except Exception:
+        pass
+    return redirect(url_for('login'))
+
 @app.route('/')
+@login_required
 def index():
     body = """
     <div class="row justify-content-center">
@@ -57,6 +126,7 @@ def index():
     return render_page(body)
 
 @app.route('/register', methods=['GET', 'POST'])
+@login_required
 def register_patient():
     error = None
     if request.method == 'POST':
@@ -115,6 +185,7 @@ def register_patient():
     return render_page(body)
 
 @app.route('/search', methods=['GET'])
+@login_required
 def search_patients():
     query = request.args.get('q', '')
     patients = []
@@ -172,6 +243,7 @@ def search_patients():
     return render_page(body)
 
 @app.route('/patient/<int:patient_id>')
+@login_required
 def patient_profile(patient_id):
     p_res = supabase.table('patients').select('*').eq('id', patient_id).execute()
     if not p_res.data:
@@ -235,6 +307,7 @@ def patient_profile(patient_id):
     return render_page(body)
 
 @app.route('/visit/new/<int:patient_id>', methods=['GET', 'POST'])
+@login_required
 def log_visit(patient_id):
     if request.method == 'POST':
         diagnosis = request.form.get('diagnosis')
