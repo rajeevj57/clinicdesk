@@ -295,7 +295,8 @@ def patient_profile(patient_id):
                 <p class="mb-1"><strong>Phone:</strong> {patient['phone']}</p>
                 <p class="mb-1"><strong>Age:</strong> {patient.get('age', '')}</p>
                 <p class="mb-3"><strong>Gender:</strong> {patient.get('gender', '')}</p>
-                <a href="/visit/new/{patient['id']}" class="btn btn-success w-100">🩺 Log New Visit & Rx</a>
+                <a href="/visit/new/{patient['id']}" class="btn btn-success w-100 mb-2">🩺 Log New Visit & Rx</a>
+                <a href="/patient/{patient['id']}/print" target="_blank" class="btn btn-outline-secondary w-100">🖨️ Print / Save PDF Summary</a>
             </div>
         </div>
         <div class="col-md-8">
@@ -305,6 +306,77 @@ def patient_profile(patient_id):
     </div>
     """
     return render_page(body)
+
+@app.route('/patient/<int:patient_id>/print')
+@login_required
+def print_patient_summary(patient_id):
+    p_res = supabase.table('patients').select('*').eq('id', patient_id).execute()
+    if not p_res.data:
+        return "Patient not found", 404
+    patient = p_res.data[0]
+
+    v_res = supabase.table('visits').select('*, prescriptions(*)').eq('patient_id', patient_id).order('created_at', desc=True).execute()
+    visits = v_res.data
+
+    visit_rows = ""
+    if visits:
+        for v in visits:
+            visit_date = v.get('visit_date', v.get('created_at', ''))[:10]
+            rx_html = ""
+            if v.get('prescriptions'):
+                rx_url = v['prescriptions'][0]['prescription_url']
+                rx_html = f'<div style="margin-top: 10px;"><img src="{rx_url}" style="max-width: 300px; border: 1px solid #ccc; padding: 5px;" alt="Prescription"></div>'
+
+            visit_rows += f"""
+            <div style="border-bottom: 1px solid #ddd; padding-bottom: 15px; margin-bottom: 15px;">
+                <p><strong>Date:</strong> {visit_date} | <strong>Diagnosis/Symptoms:</strong> {v.get('diagnosis_tags', 'N/A')}</p>
+                <p><strong>Notes:</strong> {v.get('notes', 'No notes.')}</p>
+                {rx_html}
+            </div>
+            """
+    else:
+        visit_rows = "<p>No visit history recorded.</p>"
+
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Patient Medical Summary - {patient['name']}</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+        <style>
+            @media print {{
+                .no-print {{ display: none !important; }}
+                body {{ background: white !important; font-size: 14px; }}
+            }}
+        </style>
+    </head>
+    <body class="bg-white p-5" onload="window.print()">
+        <div class="container">
+            <div class="d-flex justify-content-between align-items-center border-bottom pb-3 mb-4">
+                <div>
+                    <h2>🏥 ClinicDesk - Patient Medical Summary</h2>
+                    <p class="text-muted mb-0">Generated via ClinicDesk SaaS</p>
+                </div>
+                <button onclick="window.print()" class="btn btn-primary no-print">🖨️ Print / Save PDF</button>
+            </div>
+            
+            <div class="card p-3 mb-4 bg-light border-0">
+                <h4 class="text-primary">{patient['name']}</h4>
+                <div class="row">
+                    <div class="col-md-4"><strong>Phone:</strong> {patient['phone']}</div>
+                    <div class="col-md-4"><strong>Age:</strong> {patient.get('age', 'N/A')}</div>
+                    <div class="col-md-4"><strong>Gender:</strong> {patient.get('gender', 'N/A')}</div>
+                </div>
+            </div>
+
+            <h4 class="mb-3">Visit & Prescription History</h4>
+            {visit_rows}
+        </div>
+    </body>
+    </html>
+    """
+    return html
 
 @app.route('/visit/new/<int:patient_id>', methods=['GET', 'POST'])
 @login_required
