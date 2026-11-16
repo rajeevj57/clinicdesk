@@ -22,13 +22,14 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# Single unified template wrapper
+# Single unified template wrapper with Revenue Reports link
 def render_page(body_content, **kwargs):
     nav_links = ""
     if 'user' in session:
         nav_links = f"""
             <a href="/" class="btn btn-outline-light btn-sm me-2">Dashboard</a>
             <a href="/appointments" class="btn btn-outline-light btn-sm me-2">📅 Appointments</a>
+            <a href="/revenue" class="btn btn-outline-light btn-sm me-2">💰 Revenue Reports</a>
             <a href="/search" class="btn btn-outline-light btn-sm me-2">Search Patients</a>
             <a href="/register" class="btn btn-outline-light btn-sm me-2">Register Patient</a>
             <a href="/logout" class="btn btn-danger btn-sm">Logout</a>
@@ -119,9 +120,10 @@ def index():
         total_patients = 0
 
     try:
-        v_res = supabase.table('visits').select('id, consultation_fee', count='exact').execute()
-        total_visits = v_res.count if v_res.count is not None else len(v_res.data)
-        total_revenue = sum([float(v.get('consultation_fee') or 0) for v in v_res.data])
+        v_res = supabase.table('visits').select('id, consultation_fee, payment_status').execute()
+        visits_data = v_res.data if v_res.data else []
+        total_visits = len(visits_data)
+        total_revenue = sum([float(v.get('consultation_fee') or 0) for v in visits_data if v.get('payment_status') == 'Paid'])
     except Exception:
         total_visits = 0
         total_revenue = 0
@@ -190,7 +192,7 @@ def index():
         <div class="col-md-3">
             <div class="card shadow-sm border-0 bg-dark text-white p-3">
                 <div class="card-body">
-                    <h6 class="text-uppercase fw-semibold mb-2">Total Revenue</h6>
+                    <h6 class="text-uppercase fw-semibold mb-2">Collected Revenue</h6>
                     <h2 class="display-5 fw-bold mb-0">₹{total_revenue:,.0f}</h2>
                 </div>
             </div>
@@ -204,8 +206,8 @@ def index():
                 <h5 class="text-primary mb-3">⚡ Quick Actions</h5>
                 <div class="d-grid gap-2">
                     <a href="/appointments" class="btn btn-outline-primary">📅 View Today's Queue</a>
+                    <a href="/revenue" class="btn btn-outline-dark">💰 View Financial Reports</a>
                     <a href="/register" class="btn btn-primary">➕ Register New Patient</a>
-                    <a href="/search" class="btn btn-outline-secondary">🔍 Search Patient Records</a>
                 </div>
             </div>
         </div>
@@ -232,6 +234,119 @@ def index():
             </div>
         </div>
     </div>
+    """
+    return render_page(body)
+
+@app.route('/revenue')
+@login_required
+def revenue_reports():
+    try:
+        # Fetch all visits with associated patient details
+        res = supabase.table('visits').select('*, patients(name, phone)').order('created_at', desc=True).execute()
+        visits = res.data if res.data else []
+    except Exception as e:
+        visits = []
+
+    total_collected = sum([float(v.get('consultation_fee') or 0) for v in visits if v.get('payment_status') == 'Paid'])
+    total_pending = sum([float(v.get('consultation_fee') or 0) for v in visits if v.get('payment_status') == 'Pending'])
+    total_billed = total_collected + total_pending
+
+    rows = ""
+    if visits:
+        for idx, v in enumerate(visits, 1):
+            p_info = v.get('patients', {})
+            p_name = p_info.get('name', 'Unknown')
+            p_phone = p_info.get('phone', 'N/A')
+            p_id = p_info.get('patient_id', '#')
+            visit_date = v.get('visit_date', v.get('created_at', ''))[:10]
+            fee = float(v.get('consultation_fee') or 0)
+            status = v.get('payment_status', 'Paid')
+            badge_class = "bg-success" if status == "Paid" else "bg-warning text-dark"
+
+            rows += f"""
+            <tr>
+                <td class="fw-bold">#{idx}</td>
+                <td>{visit_date}</td>
+                <td><a href="/patient/{p_id}" class="text-decoration-none fw-bold">{p_name}</a> ({p_phone})</td>
+                <td>{v.get('diagnosis_tags', 'General Consultation')}</td>
+                <td class="fw-bold">₹{fee:,.0f}</td>
+                <td><span class="badge {badge_class}">{status}</span></td>
+            </tr>
+            """
+    else:
+        rows = '<tr><td colspan="6" class="text-center py-4 text-muted">No financial transaction records found.</td></tr>'
+
+    body = f"""
+    <div class="row mb-4">
+        <div class="col-md-8">
+            <h2 class="fw-bold text-primary">💰 Financial Revenue & Billing Report</h2>
+            <p class="text-muted">Detailed ledger of all consultation fees, payments collected, and pending dues.</p>
+        </div>
+        <div class="col-md-4 text-end">
+            <button onclick="window.print()" class="btn btn-outline-primary">🖨️ Print / Save Report PDF</button>
+        </div>
+    </div>
+
+    <!-- Financial Summary Cards -->
+    <div class="row g-4 mb-4">
+        <div class="col-md-4">
+            <div class="card shadow-sm border-0 bg-success text-white p-3">
+                <div class="card-body">
+                    <h6 class="text-uppercase fw-semibold mb-2">Total Collected (Paid)</h6>
+                    <h2 class="display-6 fw-bold mb-0">₹{total_collected:,.0f}</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card shadow-sm border-0 bg-warning text-dark p-3">
+                <div class="card-body">
+                    <h6 class="text-uppercase fw-semibold mb-2">Pending Dues</h6>
+                    <h2 class="display-6 fw-bold mb-0">₹{total_pending:,.0f}</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card shadow-sm border-0 bg-primary text-white p-3">
+                <div class="card-body">
+                    <h6 class="text-uppercase fw-semibold mb-2">Total Billed Volume</h6>
+                    <h2 class="display-6 fw-bold mb-0">₹{total_billed:,.0f}</h2>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Transaction Ledger Table -->
+    <div class="card shadow-sm">
+        <div class="card-header bg-white py-3">
+            <h5 class="mb-0 text-primary">Consultation Ledger</h5>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>#</th>
+                            <th>Date</th>
+                            <th>Patient Name & Phone</th>
+                            <th>Diagnosis / Notes</th>
+                            <th>Fee Amount</th>
+                            <th>Payment Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    
+    <style>
+        @media print {{
+            .navbar, .btn, .no-print {{ display: none !important; }}
+            body {{ background: white !important; }}
+        }}
+    </style>
     """
     return render_page(body)
 
