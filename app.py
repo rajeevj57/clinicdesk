@@ -114,7 +114,7 @@ def index():
     <div class="row justify-content-center">
         <div class="col-md-8 text-center py-5">
             <h1 class="display-5 fw-bold text-primary">ClinicDesk Management</h1>
-            <p class="lead text-muted">Cloud-native patient records and prescription management for independent clinics.</p>
+            <p class="lead text-muted">Cloud-native patient records and medical scan management for independent clinics.</p>
             <hr class="my-4">
             <div class="d-flex justify-content-center gap-3">
                 <a href="/register" class="btn btn-primary btn-lg">➕ Register Patient</a>
@@ -259,15 +259,25 @@ def patient_profile(patient_id):
             visit_date = v.get('visit_date', v.get('created_at', ''))[:10]
             rx_section = ""
             if v.get('prescriptions'):
-                rx_url = v['prescriptions'][0]['prescription_url']
+                rx = v['prescriptions'][0]
+                rx_url = rx['prescription_url']
+                doc_type = rx.get('document_type', 'Prescription')
+                
+                if rx_url.lower().endswith('.pdf'):
+                    preview_element = f'<a href="{rx_url}" target="_blank" class="btn btn-sm btn-outline-secondary">📄 Open PDF Document</a>'
+                else:
+                    preview_element = f'''
+                    <a href="{rx_url}" target="_blank">
+                        <img src="{rx_url}" alt="{doc_type}" class="img-thumbnail" style="max-height: 150px; object-fit: contain;">
+                    </a>
+                    '''
+
                 rx_section = f'''
                 <div class="mt-3">
-                    <span class="d-block text-muted small mb-1">Prescription Image:</span>
-                    <a href="{rx_url}" target="_blank">
-                        <img src="{rx_url}" alt="Prescription" class="img-thumbnail" style="max-height: 150px; object-fit: contain;">
-                    </a>
+                    <span class="badge bg-secondary mb-2">{doc_type}</span>
+                    <div>{preview_element}</div>
                     <div class="mt-1">
-                        <a href="{rx_url}" target="_blank" class="text-decoration-none small">🔍 View Full Image</a>
+                        <a href="{rx_url}" target="_blank" class="text-decoration-none small">🔍 View Full File</a>
                     </div>
                 </div>
                 '''
@@ -295,7 +305,7 @@ def patient_profile(patient_id):
                 <p class="mb-1"><strong>Phone:</strong> {patient['phone']}</p>
                 <p class="mb-1"><strong>Age:</strong> {patient.get('age', '')}</p>
                 <p class="mb-3"><strong>Gender:</strong> {patient.get('gender', '')}</p>
-                <a href="/visit/new/{patient['id']}" class="btn btn-success w-100 mb-2">🩺 Log New Visit & Rx</a>
+                <a href="/visit/new/{patient['id']}" class="btn btn-success w-100 mb-2">🩺 Log New Visit & Scan</a>
                 <a href="/patient/{patient['id']}/print" target="_blank" class="btn btn-outline-secondary w-100">🖨️ Print / Save PDF Summary</a>
             </div>
         </div>
@@ -324,8 +334,13 @@ def print_patient_summary(patient_id):
             visit_date = v.get('visit_date', v.get('created_at', ''))[:10]
             rx_html = ""
             if v.get('prescriptions'):
-                rx_url = v['prescriptions'][0]['prescription_url']
-                rx_html = f'<div style="margin-top: 10px;"><img src="{rx_url}" style="max-width: 300px; border: 1px solid #ccc; padding: 5px;" alt="Prescription"></div>'
+                rx = v['prescriptions'][0]
+                rx_url = rx['prescription_url']
+                doc_type = rx.get('document_type', 'Prescription')
+                if not rx_url.lower().endswith('.pdf'):
+                    rx_html = f'<div style="margin-top: 10px;"><p><strong>[{doc_type}]</strong></p><img src="{rx_url}" style="max-width: 300px; border: 1px solid #ccc; padding: 5px;" alt="Scan"></div>'
+                else:
+                    rx_html = f'<div style="margin-top: 10px;"><p><strong>[{doc_type}]</strong> - <a href="{rx_url}" target="_blank">View PDF Document</a></p></div>'
 
             visit_rows += f"""
             <div style="border-bottom: 1px solid #ddd; padding-bottom: 15px; margin-bottom: 15px;">
@@ -370,7 +385,7 @@ def print_patient_summary(patient_id):
                 </div>
             </div>
 
-            <h4 class="mb-3">Visit & Prescription History</h4>
+            <h4 class="mb-3">Visit, Prescription & Scan History</h4>
             {visit_rows}
         </div>
     </body>
@@ -384,6 +399,7 @@ def log_visit(patient_id):
     if request.method == 'POST':
         diagnosis = request.form.get('diagnosis')
         notes = request.form.get('notes')
+        document_type = request.form.get('document_type', 'Prescription')
         file = request.files.get('prescription_file')
 
         v_res = supabase.table('visits').insert({
@@ -405,7 +421,8 @@ def log_visit(patient_id):
 
                 supabase.table('prescriptions').insert({
                     "visit_id": visit_id,
-                    "prescription_url": public_url
+                    "prescription_url": public_url,
+                    "document_type": document_type
                 }).execute()
 
         return redirect(url_for('patient_profile', patient_id=patient_id))
@@ -417,7 +434,7 @@ def log_visit(patient_id):
     <div class="row justify-content-center">
         <div class="col-md-6">
             <div class="card shadow-sm p-4">
-                <h3 class="mb-3 text-primary">Log Visit for {patient['name']}</h3>
+                <h3 class="mb-3 text-primary">Log Visit & Scan for {patient['name']}</h3>
                 <form method="POST" enctype="multipart/form-data">
                     <div class="mb-3">
                         <label class="form-label">Diagnosis / Symptoms</label>
@@ -428,10 +445,20 @@ def log_visit(patient_id):
                         <textarea name="notes" class="form-control" rows="3" placeholder="Prescription details, dosage, advice..."></textarea>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label">Upload Prescription Image / Scan</label>
-                        <input type="file" name="prescription_file" class="form-control" accept="image/*">
+                        <label class="form-label">Document Type</label>
+                        <select name="document_type" class="form-select">
+                            <option value="Prescription">Prescription</option>
+                            <option value="X-Ray">X-Ray / Bone Scan</option>
+                            <option value="Ultrasound">Ultrasound / Echo</option>
+                            <option value="MRI">MRI / CT Scan</option>
+                            <option value="Lab Report">Blood / Lab Report</option>
+                        </select>
                     </div>
-                    <button type="submit" class="btn btn-primary w-100">Save Consultation</button>
+                    <div class="mb-3">
+                        <label class="form-label">Upload Scan Image or PDF Report</label>
+                        <input type="file" name="prescription_file" class="form-control" accept="image/*,.pdf">
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100">Save Consultation & File</button>
                 </form>
             </div>
         </div>
