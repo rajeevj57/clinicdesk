@@ -15,10 +15,9 @@ SUPABASE_URL = "https://pfmldhpidblncypuagld.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBmbWxkaHBpZGJsbmN5cHVhZ2xkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ2NTM2MjEsImV4cCI6MjExMDIyOTYyMX0.SI7i2c5IeGwP3T3qi0GaCEPU-WUeRFP2T4oh0Ioun0c"
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Gemini AI API Key Configuration
+# Gemini AI API Key Configuration (Python 3.7+ Compatible REST API)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
 
-# AI Vision Helper Function via Direct REST API (Python 3.7 Compatible)
 def extract_medical_file_with_ai(file_bytes, mime_type):
     """Sends uploaded prescription or lab report to Gemini 1.5 Flash via REST API."""
     if GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE":
@@ -26,8 +25,6 @@ def extract_medical_file_with_ai(file_bytes, mime_type):
     
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-        
-        # Convert file bytes to base64 for JSON payload
         encoded_data = base64.b64encode(file_bytes).decode('utf-8')
         
         payload = {
@@ -56,9 +53,7 @@ def extract_medical_file_with_ai(file_bytes, mime_type):
         response = requests.post(url, json=payload, timeout=30)
         result = response.json()
         
-        # Extract text response from Gemini API JSON structure
         text = result["candidates"][0]["content"]["parts"][0]["text"]
-        
         diagnosis = "AI Extracted Report"
         notes = text
         
@@ -135,7 +130,7 @@ def login():
             if response.user:
                 session['user'] = email
                 return redirect(url_for('index'))
-        except Exception as e:
+        except Exception:
             error = "Invalid email or password. Please verify your Supabase Auth credentials."
 
     body = f"""
@@ -183,7 +178,7 @@ def index():
         v_res = supabase.table('visits').select('id, consultation_fee, payment_status').execute()
         visits_data = v_res.data if v_res.data else []
         total_visits = len(visits_data)
-        total_revenue = sum([float(v.get('consultation_fee') or 0) for v in visits_data if v.get('payment_status'] == 'Paid'])
+        total_revenue = sum([float(v.get('consultation_fee') or 0) for v in visits_data if v.get('payment_status') == 'Paid'])
     except Exception:
         total_visits = 0
         total_revenue = 0
@@ -306,8 +301,8 @@ def revenue_reports():
     except Exception:
         visits = []
 
-    total_collected = sum([float(v.get('consultation_fee') or 0) for v in visits if v.get('payment_status'] == 'Paid'])
-    total_pending = sum([float(v.get('consultation_fee') or 0) for v in visits if v.get('payment_status'] == 'Pending'])
+    total_collected = sum([float(v.get('consultation_fee') or 0) for v in visits if v.get('payment_status') == 'Paid'])
+    total_pending = sum([float(v.get('consultation_fee') or 0) for v in visits if v.get('payment_status') == 'Pending'])
     total_billed = total_collected + total_pending
 
     rows = ""
@@ -886,12 +881,13 @@ def log_visit(patient_id):
 
     p_res = supabase.table('patients').select('*').eq('id', patient_id).execute()
     patient = p_res.data[0] if p_res.data else None
+    patient_name = patient['name'] if patient else 'Patient'
 
     body = f"""
     <div class="row justify-content-center">
         <div class="col-md-7">
             <div class="card shadow-sm p-4">
-                <h3 class="mb-3 text-primary">Log Visit, Scan & AI OCR for {patient['name']}</h3>
+                <h3 class="mb-3 text-primary">Log Visit, Scan & AI OCR for {patient_name}</h3>
                 <form method="POST" enctype="multipart/form-data">
                     <div class="mb-3">
                         <label class="form-label">Upload Scan Image or PDF Report</label>
