@@ -1,4 +1,5 @@
 import os
+from datetime import date
 from functools import wraps
 from flask import Flask, redirect, render_template_string, request, session, url_for
 from supabase import Client, create_client
@@ -27,6 +28,7 @@ def render_page(body_content, **kwargs):
     if 'user' in session:
         nav_links = f"""
             <a href="/" class="btn btn-outline-light btn-sm me-2">Home</a>
+            <a href="/appointments" class="btn btn-outline-light btn-sm me-2">📅 Appointments</a>
             <a href="/search" class="btn btn-outline-light btn-sm me-2">Search Patients</a>
             <a href="/register" class="btn btn-outline-light btn-sm me-2">Register Patient</a>
             <a href="/logout" class="btn btn-danger btn-sm">Logout</a>
@@ -114,11 +116,161 @@ def index():
     <div class="row justify-content-center">
         <div class="col-md-8 text-center py-5">
             <h1 class="display-5 fw-bold text-primary">ClinicDesk Management</h1>
-            <p class="lead text-muted">Cloud-native patient records and medical scan management for independent clinics.</p>
+            <p class="lead text-muted">Cloud-native patient records, scan management, and appointment queue for independent clinics.</p>
             <hr class="my-4">
-            <div class="d-flex justify-content-center gap-3">
-                <a href="/register" class="btn btn-primary btn-lg">➕ Register Patient</a>
-                <a href="/search" class="btn btn-outline-secondary btn-lg">🔍 Search & View Records</a>
+            <div class="d-flex justify-content-center gap-3 flex-wrap">
+                <a href="/appointments" class="btn btn-primary btn-lg">📅 Today's Appointments & Queue</a>
+                <a href="/register" class="btn btn-outline-primary btn-lg">➕ Register Patient</a>
+                <a href="/search" class="btn btn-outline-secondary btn-lg">🔍 Search Records</a>
+            </div>
+        </div>
+    </div>
+    """
+    return render_page(body)
+
+@app.route('/appointments', methods=['GET', 'POST'])
+@login_required
+def appointments_queue():
+    selected_date = request.args.get('date', str(date.today()))
+    error = None
+    success = None
+
+    if request.method == 'POST':
+        action = request.form.get('action')
+        
+        if action == 'add':
+            patient_id = request.form.get('patient_id')
+            appt_date = request.form.get('appointment_date')
+            time_slot = request.form.get('time_slot')
+            
+            try:
+                supabase.table('appointments').insert({
+                    "patient_id": int(patient_id),
+                    "appointment_date": appt_date,
+                    "time_slot": time_slot,
+                    "status": "Waiting"
+                }).execute()
+                success = "Appointment added to queue successfully!"
+            except Exception as e:
+                error = f"Error adding appointment: {str(e)}"
+                
+        elif action == 'update_status':
+            appt_id = request.form.get('appointment_id')
+            new_status = request.form.get('status')
+            try:
+                supabase.table('appointments').update({"status": new_status}).eq('id', appt_id).execute()
+            except Exception as e:
+                error = f"Error updating status: {str(e)}"
+
+    # Fetch patients for dropdown
+    p_res = supabase.table('patients').select('id, name, phone').order('name').execute()
+    patients = p_res.data if p_res.data else []
+
+    # Fetch appointments for the selected date with patient info
+    a_res = supabase.table('appointments').select('*, patients(name, phone, id)').eq('appointment_date', selected_date).order('created_at').execute()
+    appointments = a_res.data if a_res.data else []
+
+    patient_options = "".join([f'<option value="{p["id"]}">{p["name"]} ({p["phone"]})</option>' for p in patients])
+
+    rows = ""
+    if appointments:
+        for idx, a in enumerate(appointments, 1):
+            p_info = a.get('patients', {})
+            p_name = p_info.get('name', 'Unknown')
+            p_id = p_info.get('id', '#')
+            status = a.get('status', 'Waiting')
+            
+            # Badge colors based on status
+            badge_color = "bg-warning text-dark"
+            if status == "In Consultation": badge_color = "bg-info text-dark"
+            elif status == "Completed": badge_color = "bg-success"
+            elif status == "Cancelled": badge_color = "bg-danger"
+
+            rows += f"""
+            <tr>
+                <td class="fw-bold">#{idx}</td>
+                <td><a href="/patient/{p_id}" class="text-decoration-none fw-bold">{p_name}</a></td>
+                <td>{a.get('time_slot', 'Walk-in')}</td>
+                <td><span class="badge {badge_color}">{status}</span></td>
+                <td>
+                    <form method="POST" class="d-inline">
+                        <input type="hidden" name="action" value="update_status">
+                        <input type="hidden" name="appointment_id" value="{a['id']}">
+                        <select name="status" onchange="this.form.submit()" class="form-select form-select-sm d-inline-block w-auto">
+                            <option value="Waiting" {'selected' if status=='Waiting' else ''}>Waiting</option>
+                            <option value="In Consultation" {'selected' if status=='In Consultation' else ''}>In Consultation</option>
+                            <option value="Completed" {'selected' if status=='Completed' else ''}>Completed</option>
+                            <option value="Cancelled" {'selected' if status=='Cancelled' else ''}>Cancelled</option>
+                        </select>
+                    </form>
+                </td>
+            </tr>
+            """
+    else:
+        rows = '<tr><td colspan="5" class="text-center py-4 text-muted">No appointments scheduled for this date.</td></tr>'
+
+    body = f"""
+    <div class="row">
+        <div class="col-md-12">
+            <h3 class="mb-4">📅 Daily Appointment Queue</h3>
+            {f'<div class="alert alert-success">{success}</div>' if success else ''}
+            {f'<div class="alert alert-danger">{error}</div>' if error else ''}
+        </div>
+        
+        <!-- Queue Filter & Table -->
+        <div class="col-md-8">
+            <div class="card shadow-sm mb-4 p-3">
+                <form method="GET" class="row g-3 align-items-center mb-3">
+                    <div class="col-auto">
+                        <label class="col-form-label fw-bold">Select Date:</label>
+                    </div>
+                    <div class="col-auto">
+                        <input type="date" name="date" value="{selected_date}" class="form-control" onchange="this.form.submit()">
+                    </div>
+                </form>
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Token</th>
+                                <th>Patient Name</th>
+                                <th>Time Slot</th>
+                                <th>Status</th>
+                                <th>Update Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rows}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Add Appointment Form -->
+        <div class="col-md-4">
+            <div class="card shadow-sm p-4">
+                <h5 class="text-primary mb-3">➕ Schedule Appointment</h5>
+                <form method="POST">
+                    <input type="hidden" name="action" value="add">
+                    <div class="mb-3">
+                        <label class="form-label">Select Patient</label>
+                        <select name="patient_id" class="form-select" required>
+                            <option value="">-- Choose Patient --</option>
+                            {patient_options}
+                        </select>
+                        <div class="form-text">Patient not listed? <a href="/register">Register here</a></div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Appointment Date</label>
+                        <input type="date" name="appointment_date" value="{selected_date}" class="form-control" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Time / Slot</label>
+                        <input type="text" name="time_slot" class="form-control" placeholder="e.g. 10:30 AM or Walk-In">
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100">Add to Queue</button>
+                </form>
             </div>
         </div>
     </div>
