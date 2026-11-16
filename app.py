@@ -27,7 +27,7 @@ def render_page(body_content, **kwargs):
     nav_links = ""
     if 'user' in session:
         nav_links = f"""
-            <a href="/" class="btn btn-outline-light btn-sm me-2">Home</a>
+            <a href="/" class="btn btn-outline-light btn-sm me-2">Dashboard</a>
             <a href="/appointments" class="btn btn-outline-light btn-sm me-2">📅 Appointments</a>
             <a href="/search" class="btn btn-outline-light btn-sm me-2">Search Patients</a>
             <a href="/register" class="btn btn-outline-light btn-sm me-2">Register Patient</a>
@@ -112,16 +112,114 @@ def logout():
 @app.route('/')
 @login_required
 def index():
-    body = """
-    <div class="row justify-content-center">
-        <div class="col-md-8 text-center py-5">
-            <h1 class="display-5 fw-bold text-primary">ClinicDesk Management</h1>
-            <p class="lead text-muted">Cloud-native patient records, scan management, and appointment queue for independent clinics.</p>
-            <hr class="my-4">
-            <div class="d-flex justify-content-center gap-3 flex-wrap">
-                <a href="/appointments" class="btn btn-primary btn-lg">📅 Today's Appointments & Queue</a>
-                <a href="/register" class="btn btn-outline-primary btn-lg">➕ Register Patient</a>
-                <a href="/search" class="btn btn-outline-secondary btn-lg">🔍 Search Records</a>
+    # Fetch Analytics Metrics
+    try:
+        p_res = supabase.table('patients').select('id', count='exact').execute()
+        total_patients = p_res.count if p_res.count is not None else len(p_res.data)
+    except Exception:
+        total_patients = 0
+
+    try:
+        v_res = supabase.table('visits').select('id', count='exact').execute()
+        total_visits = v_res.count if v_res.count is not None else len(v_res.data)
+    except Exception:
+        total_visits = 0
+
+    today_str = str(date.today())
+    try:
+        a_res = supabase.table('appointments').select('id', count='exact').eq('appointment_date', today_str).execute()
+        today_appts = a_res.count if a_res.count is not None else len(a_res.data)
+    except Exception:
+        today_appts = 0
+
+    try:
+        recent_res = supabase.table('patients').select('*').order('created_at', desc=True).limit(5).execute()
+        recent_patients = recent_res.data if recent_res.data else []
+    except Exception:
+        recent_patients = []
+
+    recent_rows = ""
+    if recent_patients:
+        for p in recent_patients:
+            recent_rows += f"""
+            <tr>
+                <td>{p['name']}</td>
+                <td>{p['phone']}</td>
+                <td>{p.get('age', 'N/A')}</td>
+                <td><a href="/patient/{p['id']}" class="btn btn-sm btn-outline-primary">View Profile</a></td>
+            </tr>
+            """
+    else:
+        recent_rows = '<tr><td colspan="4" class="text-center text-muted py-3">No recent patients registered.</td></tr>'
+
+    body = f"""
+    <div class="row mb-4">
+        <div class="col-md-12">
+            <h2 class="fw-bold text-primary">🏥 ClinicDesk Doctor Dashboard</h2>
+            <p class="text-muted">Welcome back! Here is your clinic's live operational overview for today ({today_str}).</p>
+        </div>
+    </div>
+
+    <!-- Metric Cards -->
+    <div class="row g-4 mb-5">
+        <div class="col-md-4">
+            <div class="card shadow-sm border-0 bg-primary text-white p-3">
+                <div class="card-body">
+                    <h6 class="text-uppercase fw-semibold mb-2">Total Patients</h6>
+                    <h2 class="display-5 fw-bold mb-0">{total_patients}</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card shadow-sm border-0 bg-success text-white p-3">
+                <div class="card-body">
+                    <h6 class="text-uppercase fw-semibold mb-2">Today's Appointments</h6>
+                    <h2 class="display-5 fw-bold mb-0">{today_appts}</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card shadow-sm border-0 bg-info text-white p-3">
+                <div class="card-body">
+                    <h6 class="text-uppercase fw-semibold mb-2">Total Consultations</h6>
+                    <h2 class="display-5 fw-bold mb-0">{total_visits}</h2>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Quick Actions & Recent Patients -->
+    <div class="row g-4">
+        <div class="col-md-4">
+            <div class="card shadow-sm p-4 h-100">
+                <h5 class="text-primary mb-3">⚡ Quick Actions</h5>
+                <div class="d-grid gap-2">
+                    <a href="/appointments" class="btn btn-outline-primary">📅 View Today's Queue</a>
+                    <a href="/register" class="btn btn-primary">➕ Register New Patient</a>
+                    <a href="/search" class="btn btn-outline-secondary">🔍 Search Patient Records</a>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-8">
+            <div class="card shadow-sm h-100">
+                <div class="card-header bg-white py-3">
+                    <h5 class="mb-0 text-primary">Recent Patient Registrations</h5>
+                </div>
+                <div class="card-body p-0">
+                    <table class="table table-hover mb-0 align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Name</th>
+                                <th>Phone</th>
+                                <th>Age</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {recent_rows}
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
     </div>
@@ -162,11 +260,9 @@ def appointments_queue():
             except Exception as e:
                 error = f"Error updating status: {str(e)}"
 
-    # Fetch patients for dropdown
     p_res = supabase.table('patients').select('id, name, phone').order('name').execute()
     patients = p_res.data if p_res.data else []
 
-    # Fetch appointments for the selected date with patient info
     a_res = supabase.table('appointments').select('*, patients(name, phone, id)').eq('appointment_date', selected_date).order('created_at').execute()
     appointments = a_res.data if a_res.data else []
 
@@ -180,7 +276,6 @@ def appointments_queue():
             p_id = p_info.get('id', '#')
             status = a.get('status', 'Waiting')
             
-            # Badge colors based on status
             badge_color = "bg-warning text-dark"
             if status == "In Consultation": badge_color = "bg-info text-dark"
             elif status == "Completed": badge_color = "bg-success"
@@ -217,7 +312,6 @@ def appointments_queue():
             {f'<div class="alert alert-danger">{error}</div>' if error else ''}
         </div>
         
-        <!-- Queue Filter & Table -->
         <div class="col-md-8">
             <div class="card shadow-sm mb-4 p-3">
                 <form method="GET" class="row g-3 align-items-center mb-3">
@@ -247,7 +341,6 @@ def appointments_queue():
             </div>
         </div>
 
-        <!-- Add Appointment Form -->
         <div class="col-md-4">
             <div class="card shadow-sm p-4">
                 <h5 class="text-primary mb-3">➕ Schedule Appointment</h5>
