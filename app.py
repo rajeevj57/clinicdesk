@@ -20,7 +20,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
 
 def extract_medical_file_with_ai(file_bytes, mime_type):
     """Sends uploaded prescription or lab report to Gemini 1.5 Flash via REST API."""
-    if GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE":
+   GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_API_KEY_HERE")
         return "AI API Key not configured.", "OCR skipped. Please configure GEMINI_API_KEY."
     
     try:
