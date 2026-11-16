@@ -16,11 +16,11 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Gemini AI API Key Configuration (Python 3.7+ Compatible REST API)
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_API_KEY_HERE")
 
 def extract_medical_file_with_ai(file_bytes, mime_type):
     """Sends uploaded prescription or lab report to Gemini 1.5 Flash via REST API."""
-   GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_API_KEY_HERE")
+    if GEMINI_API_KEY == "YOUR_API_KEY_HERE":
         return "AI API Key not configured.", "OCR skipped. Please configure GEMINI_API_KEY."
     
     try:
