@@ -1,4 +1,6 @@
 import os
+import base64
+import requests
 from datetime import date
 from functools import wraps
 from flask import Flask, redirect, render_template_string, request, session, url_for
@@ -13,6 +15,64 @@ SUPABASE_URL = "https://pfmldhpidblncypuagld.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBmbWxkaHBpZGJsbmN5cHVhZ2xkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ2NTM2MjEsImV4cCI6MjExMDIyOTYyMX0.SI7i2c5IeGwP3T3qi0GaCEPU-WUeRFP2T4oh0Ioun0c"
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# Gemini AI API Key Configuration
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
+
+# AI Vision Helper Function via Direct REST API (Python 3.7 Compatible)
+def extract_medical_file_with_ai(file_bytes, mime_type):
+    """Sends uploaded prescription or lab report to Gemini 1.5 Flash via REST API."""
+    if GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE":
+        return "AI API Key not configured.", "OCR skipped. Please configure GEMINI_API_KEY."
+    
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        
+        # Convert file bytes to base64 for JSON payload
+        encoded_data = base64.b64encode(file_bytes).decode('utf-8')
+        
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": (
+                                "You are an expert medical AI assistant. Analyze this attached medical document (prescription, lab report, or scan). "
+                                "Return your analysis strictly in two sections:\n"
+                                "DIAGNOSIS: [Briefly state suspected condition, symptoms, or test names]\n"
+                                "NOTES: [Extract all medications, dosages, lab values, and doctor instructions clearly]"
+                            )
+                        },
+                        {
+                            "inline_data": {
+                                "mime_type": mime_type,
+                                "data": encoded_data
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        response = requests.post(url, json=payload, timeout=30)
+        result = response.json()
+        
+        # Extract text response from Gemini API JSON structure
+        text = result["candidates"][0]["content"]["parts"][0]["text"]
+        
+        diagnosis = "AI Extracted Report"
+        notes = text
+        
+        if "DIAGNOSIS:" in text and "NOTES:" in text:
+            parts = text.split("NOTES:")
+            diag_part = parts[0].replace("DIAGNOSIS:", "").strip()
+            if diag_part:
+                diagnosis = diag_part[:100]
+            notes = parts[1].strip()
+            
+        return diagnosis, notes
+    except Exception as e:
+        return "General Consultation", f"AI OCR Error: {str(e)}"
+
 # Authentication Decorator
 def login_required(f):
     @wraps(f)
@@ -22,7 +82,7 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# Single unified template wrapper with Revenue Reports link
+# Single unified template wrapper
 def render_page(body_content, **kwargs):
     nav_links = ""
     if 'user' in session:
@@ -123,7 +183,7 @@ def index():
         v_res = supabase.table('visits').select('id, consultation_fee, payment_status').execute()
         visits_data = v_res.data if v_res.data else []
         total_visits = len(visits_data)
-        total_revenue = sum([float(v.get('consultation_fee') or 0) for v in visits_data if v.get('payment_status') == 'Paid'])
+        total_revenue = sum([float(v.get('consultation_fee') or 0) for v in visits_data if v.get('payment_status'] == 'Paid'])
     except Exception:
         total_visits = 0
         total_revenue = 0
@@ -241,14 +301,13 @@ def index():
 @login_required
 def revenue_reports():
     try:
-        # Fetch all visits with associated patient details
         res = supabase.table('visits').select('*, patients(name, phone)').order('created_at', desc=True).execute()
         visits = res.data if res.data else []
-    except Exception as e:
+    except Exception:
         visits = []
 
-    total_collected = sum([float(v.get('consultation_fee') or 0) for v in visits if v.get('payment_status') == 'Paid'])
-    total_pending = sum([float(v.get('consultation_fee') or 0) for v in visits if v.get('payment_status') == 'Pending'])
+    total_collected = sum([float(v.get('consultation_fee') or 0) for v in visits if v.get('payment_status'] == 'Paid'])
+    total_pending = sum([float(v.get('consultation_fee') or 0) for v in visits if v.get('payment_status'] == 'Pending'])
     total_billed = total_collected + total_pending
 
     rows = ""
@@ -782,6 +841,22 @@ def log_visit(patient_id):
         fee = request.form.get('consultation_fee', 0)
         payment_status = request.form.get('payment_status', 'Paid')
         file = request.files.get('prescription_file')
+        use_ai_ocr = request.form.get('use_ai_ocr')
+
+        file_bytes = None
+        mime_type = None
+        if file and file.filename != '':
+            file_bytes = file.read()
+            mime_type = file.content_type or 'image/jpeg'
+
+        if use_ai_ocr and file_bytes:
+            ai_diag, ai_notes = extract_medical_file_with_ai(file_bytes, mime_type)
+            if not diagnosis or diagnosis.strip() == "":
+                diagnosis = ai_diag
+            if not notes or notes.strip() == "":
+                notes = ai_notes
+            else:
+                notes = f"{notes}\n\n--- AI OCR Extracted Report ---\n{ai_notes}"
 
         v_res = supabase.table('visits').insert({
             "patient_id": patient_id,
@@ -794,12 +869,11 @@ def log_visit(patient_id):
         if v_res.data:
             visit_id = v_res.data[0]['id']
 
-            if file and file.filename != '':
+            if file and file_bytes:
                 filename = secure_filename(file.filename)
                 file_path = f"visit_{visit_id}_{filename}"
-                file_bytes = file.read()
 
-                supabase.storage.from_('prescriptions').upload(file_path, file_bytes, {"content-type": file.content_type})
+                supabase.storage.from_('prescriptions').upload(file_path, file_bytes, {"content-type": mime_type})
                 public_url = supabase.storage.from_('prescriptions').get_public_url(file_path)
 
                 supabase.table('prescriptions').insert({
@@ -815,17 +889,27 @@ def log_visit(patient_id):
 
     body = f"""
     <div class="row justify-content-center">
-        <div class="col-md-6">
+        <div class="col-md-7">
             <div class="card shadow-sm p-4">
-                <h3 class="mb-3 text-primary">Log Visit, Scan & Fee for {patient['name']}</h3>
+                <h3 class="mb-3 text-primary">Log Visit, Scan & AI OCR for {patient['name']}</h3>
                 <form method="POST" enctype="multipart/form-data">
                     <div class="mb-3">
-                        <label class="form-label">Diagnosis / Symptoms</label>
-                        <input type="text" name="diagnosis" class="form-control" placeholder="e.g. Fever, Cough, Hypertension" required>
+                        <label class="form-label">Upload Scan Image or PDF Report</label>
+                        <input type="file" name="prescription_file" id="prescription_file" class="form-control" accept="image/*,.pdf">
+                        <div class="form-check mt-2">
+                            <input class="form-check-input" type="checkbox" name="use_ai_ocr" id="use_ai_ocr" value="1" checked>
+                            <label class="form-check-label fw-semibold text-success" for="use_ai_ocr">
+                                🤖 Automatically Extract Diagnosis & Notes using Gemini AI Vision
+                            </label>
+                        </div>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label">Clinical Notes</label>
-                        <textarea name="notes" class="form-control" rows="3" placeholder="Prescription details, dosage, advice..."></textarea>
+                        <label class="form-label">Diagnosis / Symptoms (Optional if AI OCR is checked)</label>
+                        <input type="text" name="diagnosis" class="form-control" placeholder="e.g. Fever, Cough or let AI fill this">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Clinical Notes / Prescription Details</label>
+                        <textarea name="notes" class="form-control" rows="3" placeholder="Add custom notes or leave for AI extraction..."></textarea>
                     </div>
                     <div class="row">
                         <div class="col-md-6 mb-3">
@@ -850,11 +934,7 @@ def log_visit(patient_id):
                             <option value="Lab Report">Blood / Lab Report</option>
                         </select>
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label">Upload Scan Image or PDF Report</label>
-                        <input type="file" name="prescription_file" class="form-control" accept="image/*,.pdf">
-                    </div>
-                    <button type="submit" class="btn btn-primary w-100">Save Consultation & Billing</button>
+                    <button type="submit" class="btn btn-primary w-100">Save Consultation & Process AI OCR</button>
                 </form>
             </div>
         </div>
