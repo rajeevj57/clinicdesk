@@ -112,7 +112,6 @@ def logout():
 @app.route('/')
 @login_required
 def index():
-    # Fetch Analytics Metrics
     try:
         p_res = supabase.table('patients').select('id', count='exact').execute()
         total_patients = p_res.count if p_res.count is not None else len(p_res.data)
@@ -120,10 +119,12 @@ def index():
         total_patients = 0
 
     try:
-        v_res = supabase.table('visits').select('id', count='exact').execute()
+        v_res = supabase.table('visits').select('id, consultation_fee', count='exact').execute()
         total_visits = v_res.count if v_res.count is not None else len(v_res.data)
+        total_revenue = sum([float(v.get('consultation_fee') or 0) for v in v_res.data])
     except Exception:
         total_visits = 0
+        total_revenue = 0
 
     today_str = str(date.today())
     try:
@@ -162,7 +163,7 @@ def index():
 
     <!-- Metric Cards -->
     <div class="row g-4 mb-5">
-        <div class="col-md-4">
+        <div class="col-md-3">
             <div class="card shadow-sm border-0 bg-primary text-white p-3">
                 <div class="card-body">
                     <h6 class="text-uppercase fw-semibold mb-2">Total Patients</h6>
@@ -170,19 +171,27 @@ def index():
                 </div>
             </div>
         </div>
-        <div class="col-md-4">
+        <div class="col-md-3">
             <div class="card shadow-sm border-0 bg-success text-white p-3">
                 <div class="card-body">
-                    <h6 class="text-uppercase fw-semibold mb-2">Today's Appointments</h6>
+                    <h6 class="text-uppercase fw-semibold mb-2">Today's Appts</h6>
                     <h2 class="display-5 fw-bold mb-0">{today_appts}</h2>
                 </div>
             </div>
         </div>
-        <div class="col-md-4">
+        <div class="col-md-3">
             <div class="card shadow-sm border-0 bg-info text-white p-3">
                 <div class="card-body">
-                    <h6 class="text-uppercase fw-semibold mb-2">Total Consultations</h6>
+                    <h6 class="text-uppercase fw-semibold mb-2">Consultations</h6>
                     <h2 class="display-5 fw-bold mb-0">{total_visits}</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card shadow-sm border-0 bg-dark text-white p-3">
+                <div class="card-body">
+                    <h6 class="text-uppercase fw-semibold mb-2">Total Revenue</h6>
+                    <h2 class="display-5 fw-bold mb-0">₹{total_revenue:,.0f}</h2>
                 </div>
             </div>
         </div>
@@ -502,6 +511,10 @@ def patient_profile(patient_id):
     if visits:
         for v in visits:
             visit_date = v.get('visit_date', v.get('created_at', ''))[:10]
+            fee = v.get('consultation_fee', 0)
+            pay_status = v.get('payment_status', 'Paid')
+            pay_badge = "bg-success" if pay_status == "Paid" else "bg-warning text-dark"
+
             rx_section = ""
             if v.get('prescriptions'):
                 rx = v['prescriptions'][0]
@@ -532,7 +545,11 @@ def patient_profile(patient_id):
                 <div class="card-body">
                     <div class="d-flex justify-content-between align-items-center">
                         <h6 class="text-primary fw-bold mb-0">Visit Date: {visit_date}</h6>
-                        <span class="badge bg-info text-dark">{v.get('diagnosis_tags', '')}</span>
+                        <div>
+                            <span class="badge bg-dark me-1">Fee: ₹{fee}</span>
+                            <span class="badge {pay_badge} me-2">{pay_status}</span>
+                            <span class="badge bg-info text-dark">{v.get('diagnosis_tags', '')}</span>
+                        </div>
                     </div>
                     <p class="mt-2 mb-2"><strong>Notes:</strong> {v.get('notes', 'No notes recorded.')}</p>
                     {rx_section}
@@ -550,12 +567,12 @@ def patient_profile(patient_id):
                 <p class="mb-1"><strong>Phone:</strong> {patient['phone']}</p>
                 <p class="mb-1"><strong>Age:</strong> {patient.get('age', '')}</p>
                 <p class="mb-3"><strong>Gender:</strong> {patient.get('gender', '')}</p>
-                <a href="/visit/new/{patient['id']}" class="btn btn-success w-100 mb-2">🩺 Log New Visit & Scan</a>
+                <a href="/visit/new/{patient['id']}" class="btn btn-success w-100 mb-2">🩺 Log New Visit, Scan & Fee</a>
                 <a href="/patient/{patient['id']}/print" target="_blank" class="btn btn-outline-secondary w-100">🖨️ Print / Save PDF Summary</a>
             </div>
         </div>
         <div class="col-md-8">
-            <h4 class="mb-3">Consultation History</h4>
+            <h4 class="mb-3">Consultation History & Billing</h4>
             {visit_cards}
         </div>
     </div>
@@ -577,6 +594,8 @@ def print_patient_summary(patient_id):
     if visits:
         for v in visits:
             visit_date = v.get('visit_date', v.get('created_at', ''))[:10]
+            fee = v.get('consultation_fee', 0)
+            pay_status = v.get('payment_status', 'Paid')
             rx_html = ""
             if v.get('prescriptions'):
                 rx = v['prescriptions'][0]
@@ -589,7 +608,7 @@ def print_patient_summary(patient_id):
 
             visit_rows += f"""
             <div style="border-bottom: 1px solid #ddd; padding-bottom: 15px; margin-bottom: 15px;">
-                <p><strong>Date:</strong> {visit_date} | <strong>Diagnosis/Symptoms:</strong> {v.get('diagnosis_tags', 'N/A')}</p>
+                <p><strong>Date:</strong> {visit_date} | <strong>Diagnosis:</strong> {v.get('diagnosis_tags', 'N/A')} | <strong>Fee:</strong> ₹{fee} ({pay_status})</p>
                 <p><strong>Notes:</strong> {v.get('notes', 'No notes.')}</p>
                 {rx_html}
             </div>
@@ -602,7 +621,7 @@ def print_patient_summary(patient_id):
     <html lang="en">
     <head>
         <meta charset="UTF-8">
-        <title>Patient Medical Summary - {patient['name']}</title>
+        <title>Patient Medical & Billing Summary - {patient['name']}</title>
         <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
         <style>
             @media print {{
@@ -615,7 +634,7 @@ def print_patient_summary(patient_id):
         <div class="container">
             <div class="d-flex justify-content-between align-items-center border-bottom pb-3 mb-4">
                 <div>
-                    <h2>🏥 ClinicDesk - Patient Medical Summary</h2>
+                    <h2>🏥 ClinicDesk - Patient Medical & Billing Summary</h2>
                     <p class="text-muted mb-0">Generated via ClinicDesk SaaS</p>
                 </div>
                 <button onclick="window.print()" class="btn btn-primary no-print">🖨️ Print / Save PDF</button>
@@ -630,7 +649,7 @@ def print_patient_summary(patient_id):
                 </div>
             </div>
 
-            <h4 class="mb-3">Visit, Prescription & Scan History</h4>
+            <h4 class="mb-3">Visit, Prescription, Scan & Billing History</h4>
             {visit_rows}
         </div>
     </body>
@@ -645,12 +664,16 @@ def log_visit(patient_id):
         diagnosis = request.form.get('diagnosis')
         notes = request.form.get('notes')
         document_type = request.form.get('document_type', 'Prescription')
+        fee = request.form.get('consultation_fee', 0)
+        payment_status = request.form.get('payment_status', 'Paid')
         file = request.files.get('prescription_file')
 
         v_res = supabase.table('visits').insert({
             "patient_id": patient_id,
             "diagnosis_tags": diagnosis,
-            "notes": notes
+            "notes": notes,
+            "consultation_fee": float(fee) if fee else 0,
+            "payment_status": payment_status
         }).execute()
 
         if v_res.data:
@@ -679,7 +702,7 @@ def log_visit(patient_id):
     <div class="row justify-content-center">
         <div class="col-md-6">
             <div class="card shadow-sm p-4">
-                <h3 class="mb-3 text-primary">Log Visit & Scan for {patient['name']}</h3>
+                <h3 class="mb-3 text-primary">Log Visit, Scan & Fee for {patient['name']}</h3>
                 <form method="POST" enctype="multipart/form-data">
                     <div class="mb-3">
                         <label class="form-label">Diagnosis / Symptoms</label>
@@ -688,6 +711,19 @@ def log_visit(patient_id):
                     <div class="mb-3">
                         <label class="form-label">Clinical Notes</label>
                         <textarea name="notes" class="form-control" rows="3" placeholder="Prescription details, dosage, advice..."></textarea>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Consultation Fee (₹)</label>
+                            <input type="number" name="consultation_fee" class="form-control" placeholder="500" value="500">
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Payment Status</label>
+                            <select name="payment_status" class="form-select">
+                                <option value="Paid">Paid</option>
+                                <option value="Pending">Pending</option>
+                            </select>
+                        </div>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">Document Type</label>
@@ -703,7 +739,7 @@ def log_visit(patient_id):
                         <label class="form-label">Upload Scan Image or PDF Report</label>
                         <input type="file" name="prescription_file" class="form-control" accept="image/*,.pdf">
                     </div>
-                    <button type="submit" class="btn btn-primary w-100">Save Consultation & File</button>
+                    <button type="submit" class="btn btn-primary w-100">Save Consultation & Billing</button>
                 </form>
             </div>
         </div>
