@@ -49,7 +49,7 @@ def format_whatsapp_phone(phone):
 
 
 def extract_medical_file_with_ai(file_bytes, mime_type):
-    """Fast medical OCR with 90s timeout, zero thinking delay, and automatic fallback."""
+    """Fast medical OCR with 90s timeout, zero thinking delay, and detailed fallback errors."""
     api_key = get_active_gemini_key()
     if not api_key:
         return "AI API Key not configured.", "OCR skipped. Please save your Gemini API Key on the Dashboard."
@@ -87,8 +87,8 @@ def extract_medical_file_with_ai(file_bytes, mime_type):
         }
     }
 
-    models_to_try = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
-    last_error = "Unknown error"
+    models_to_try = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+    errors = []
 
     for model_name in models_to_try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
@@ -110,12 +110,13 @@ def extract_medical_file_with_ai(file_bytes, mime_type):
 
                 return diagnosis, notes
 
-            last_error = result.get("error", {}).get("message", str(result))
+            err_msg = result.get("error", {}).get("message", str(result))
+            errors.append(f"{model_name}: {err_msg}")
         except Exception as e:
-            last_error = str(e)
+            errors.append(f"{model_name}: {str(e)}")
             time.sleep(1)
 
-    return "General Consultation", f"Gemini API Error: {last_error}"
+    return "General Consultation", f"Gemini API Error: {' | '.join(errors)}"
 
 
 def login_required(f):
