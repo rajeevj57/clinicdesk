@@ -87,7 +87,7 @@ def extract_medical_file_with_ai(file_bytes, mime_type):
         }
     }
 
-    models_to_try = ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
+    models_to_try = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
     last_error = "Unknown error"
 
     for model_name in models_to_try:
