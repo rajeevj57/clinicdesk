@@ -25,13 +25,16 @@ KEY_FILE = ".gemini_key.txt"
 
 
 def get_active_gemini_key():
-    """Reads the Gemini API key saved via Dashboard or environment variable."""
+    """Reads the Gemini API key from Render environment variables or local fallback."""
+    env_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if env_key:
+        return env_key
     if os.path.exists(KEY_FILE):
         with open(KEY_FILE, "r") as f:
             saved_key = f.read().strip()
             if saved_key:
                 return saved_key
-    return os.environ.get("GEMINI_API_KEY", "").strip()
+    return ""
 
 
 def generate_share_token(patient_id, phone):
@@ -52,7 +55,7 @@ def extract_medical_file_with_ai(file_bytes, mime_type):
     """Fast medical OCR with 90s timeout and active Gemini 3.8/3.5 Flash models."""
     api_key = get_active_gemini_key()
     if not api_key:
-        return "AI API Key not configured.", "OCR skipped. Please save your Gemini API Key on the Dashboard."
+        return "AI API Key not configured.", "OCR skipped. Please verify GEMINI_API_KEY in server environment."
 
     headers = {
         "Content-Type": "application/json",
@@ -162,16 +165,6 @@ def render_page(body_content, **kwargs):
     return render_template_string(html, **kwargs)
 
 
-@app.route('/save_api_key', methods=['POST'])
-@login_required
-def save_api_key():
-    new_key = request.form.get('gemini_api_key', '').strip()
-    if new_key:
-        with open(KEY_FILE, "w") as f:
-            f.write(new_key)
-    return redirect(url_for('index'))
-
-
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     error = None
@@ -227,13 +220,6 @@ def logout():
 @app.route('/')
 @login_required
 def index():
-    active_key = get_active_gemini_key()
-    key_status = (
-        f'<span class="badge bg-success">✅ Connected ({active_key[:8]}...{active_key[-4:]})</span>'
-        if len(active_key) > 12 else
-        '<span class="badge bg-danger">❌ Not Configured</span>'
-    )
-
     try:
         p_res = supabase.table('patients').select('id', count='exact').execute()
         total_patients = p_res.count if p_res.count is not None else len(p_res.data)
@@ -319,22 +305,6 @@ def index():
                 </div>
             </div>
         </div>
-    </div>
-
-    <!-- Gemini AI Key Configuration Box -->
-    <div class="card shadow-sm p-3 mb-4 border-primary">
-        <div class="d-flex justify-content-between align-items-center mb-2">
-            <h6 class="mb-0 text-primary fw-bold">🤖 Gemini AI OCR Key Settings</h6>
-            {key_status}
-        </div>
-        <form method="POST" action="/save_api_key" class="row g-2">
-            <div class="col-md-9">
-                <input type="text" name="gemini_api_key" class="form-control form-control-sm" placeholder="Click 'Copy key' in Google AI Studio and paste your full AQ... key here" required>
-            </div>
-            <div class="col-md-3">
-                <button type="submit" class="btn btn-sm btn-primary w-100">Save API Key</button>
-            </div>
-        </form>
     </div>
 
     <div class="row g-4">
