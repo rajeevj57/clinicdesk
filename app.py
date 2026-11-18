@@ -49,7 +49,7 @@ def format_whatsapp_phone(phone):
 
 
 def extract_medical_file_with_ai(file_bytes, mime_type):
-    """Fast medical OCR with 90s timeout, zero thinking delay, and detailed fallback errors."""
+    """Fast medical OCR with 90s timeout and active Gemini 3.8/3.5 Flash models."""
     api_key = get_active_gemini_key()
     if not api_key:
         return "AI API Key not configured.", "OCR skipped. Please save your Gemini API Key on the Dashboard."
@@ -79,12 +79,7 @@ def extract_medical_file_with_ai(file_bytes, mime_type):
                     }
                 ]
             }
-        ],
-        "generationConfig": {
-            "thinkingConfig": {
-                "thinkingBudget": 0
-            }
-        }
+        ]
     }
 
     models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
@@ -1070,6 +1065,7 @@ def print_patient_summary(patient_id):
 @app.route('/visit/new/<int:patient_id>', methods=['GET', 'POST'])
 @login_required
 def log_visit(patient_id):
+    error = None
     if request.method == 'POST':
         diagnosis = request.form.get('diagnosis')
         notes = request.form.get('notes')
@@ -1079,37 +1075,38 @@ def log_visit(patient_id):
         file = request.files.get('prescription_file')
         use_ai_ocr = request.form.get('use_ai_ocr')
 
-        file_bytes = None
-        mime_type = None
-        if file and file.filename != '':
-            file_bytes = file.read()
-            mime_type = file.content_type or 'image/jpeg'
+        try:
+            file_bytes = None
+            mime_type = None
+            if file and file.filename != '':
+                file_bytes = file.read()
+                mime_type = file.content_type or 'image/jpeg'
 
-        if use_ai_ocr and file_bytes:
-            ai_diag, ai_notes = extract_medical_file_with_ai(file_bytes, mime_type)
-            if not diagnosis or diagnosis.strip() == "":
-                diagnosis = ai_diag
-            if not notes or notes.strip() == "":
-                notes = ai_notes
-            else:
-                notes = f"{notes}\n\n--- AI OCR Extracted Report ---\n{ai_notes}"
+            if use_ai_ocr and file_bytes:
+                ai_diag, ai_notes = extract_medical_file_with_ai(file_bytes, mime_type)
+                if not diagnosis or diagnosis.strip() == "":
+                    diagnosis = ai_diag
+                if not notes or notes.strip() == "":
+                    notes = ai_notes
+                else:
+                    notes = f"{notes}\n\n--- AI OCR Extracted Report ---\n{ai_notes}"
 
-        v_res = supabase.table('visits').insert({
-            "patient_id": patient_id,
-            "diagnosis_tags": diagnosis,
-            "notes": notes,
-            "consultation_fee": float(fee) if fee else 0,
-            "payment_status": payment_status
-        }).execute()
+            v_res = supabase.table('visits').insert({
+                "patient_id": patient_id,
+                "diagnosis_tags": diagnosis,
+                "notes": notes,
+                "consultation_fee": float(fee) if fee else 0,
+                "payment_status": payment_status
+            }).execute()
 
-        if v_res.data:
-            visit_id = v_res.data[0]['id']
+            if v_res.data and file and file_bytes:
+                visit_id = v_res.data[0]['id']
+                filename = secure_filename(file.filename) or "scan.jpg"
+                file_path = f"visit_{visit_id}_{int(time.time())}_{filename}"
 
-            if file and file_bytes:
-                filename = secure_filename(file.filename)
-                file_path = f"visit_{visit_id}_{filename}"
-
-                supabase.storage.from_('prescriptions').upload(file_path, file_bytes, {"content-type": mime_type})
+                supabase.storage.from_('prescriptions').upload(
+                    file_path, file_bytes, {"content-type": mime_type}
+                )
                 public_url = supabase.storage.from_('prescriptions').get_public_url(file_path)
 
                 supabase.table('prescriptions').insert({
@@ -1118,7 +1115,9 @@ def log_visit(patient_id):
                     "document_type": document_type
                 }).execute()
 
-        return redirect(url_for('patient_profile', patient_id=patient_id))
+            return redirect(url_for('patient_profile', patient_id=patient_id))
+        except Exception as e:
+            error = f"Error saving consultation: {str(e)}"
 
     p_res = supabase.table('patients').select('*').eq('id', patient_id).execute()
     patient = p_res.data[0] if p_res.data else None
@@ -1129,6 +1128,7 @@ def log_visit(patient_id):
         <div class="col-md-7">
             <div class="card shadow-sm p-4">
                 <h3 class="mb-3 text-primary">Log Visit, Scan & AI OCR for {patient_name}</h3>
+                {f'<div class="alert alert-danger">{error}</div>' if error else ''}
                 <form method="POST" enctype="multipart/form-data">
                     <div class="mb-3">
                         <label class="form-label">Upload Scan Image or PDF Report</label>
