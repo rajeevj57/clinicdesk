@@ -167,6 +167,35 @@ def extract_medical_file_with_ai(file_bytes, mime_type, document_type="Prescript
     return "General Consultation", f"Gemini API Error: {' | '.join(errors)}"
 
 
+def render_attachments_gallery(prescriptions_list, max_height="140px", show_large_link=False):
+    """Renders all attached scans/reports for a single visit in a clean horizontal grid."""
+    if not prescriptions_list:
+        return ""
+    cards = ""
+    for idx, rx in enumerate(prescriptions_list, 1):
+        rx_url = rx.get('prescription_url', '')
+        doc_type = rx.get('document_type', 'Report')
+        if rx_url.lower().endswith('.pdf'):
+            preview = f'<a href="{rx_url}" target="_blank" class="btn btn-sm btn-outline-secondary d-block">📄 Open PDF #{idx}</a>'
+        else:
+            preview = f'''
+            <a href="{rx_url}" target="_blank">
+                <img src="{rx_url}" alt="{doc_type}" class="img-thumbnail" style="max-height: {max_height}; object-fit: contain;">
+            </a>
+            '''
+        link_label = "🔍 Open High-Res" if show_large_link else "🔍 View Full"
+        cards += f"""
+        <div class="border rounded p-2 bg-light text-center" style="min-width: 150px;">
+            <span class="badge bg-secondary mb-1 d-block">{doc_type} (#{idx})</span>
+            <div>{preview}</div>
+            <div class="mt-1">
+                <a href="{rx_url}" target="_blank" class="text-decoration-none small">{link_label}</a>
+            </div>
+        </div>
+        """
+    return f'<div class="mt-3 d-flex flex-wrap gap-2">{cards}</div>'
+
+
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -939,35 +968,13 @@ def patient_profile(patient_id):
             pay_status = v.get('payment_status', 'Paid')
             pay_badge = "bg-success" if pay_status == "Paid" else "bg-warning text-dark"
 
-            rx_section = ""
-            if v.get('prescriptions'):
-                rx = v['prescriptions'][0]
-                rx_url = rx['prescription_url']
-                doc_type = rx.get('document_type', 'Prescription')
-
-                if rx_url.lower().endswith('.pdf'):
-                    preview_element = f'<a href="{rx_url}" target="_blank" class="btn btn-sm btn-outline-secondary">📄 Open PDF Document</a>'
-                else:
-                    preview_element = f'''
-                    <a href="{rx_url}" target="_blank">
-                        <img src="{rx_url}" alt="{doc_type}" class="img-thumbnail" style="max-height: 150px; object-fit: contain;">
-                    </a>
-                    '''
-
-                rx_section = f'''
-                <div class="mt-3">
-                    <span class="badge bg-secondary mb-2">{doc_type}</span>
-                    <div>{preview_element}</div>
-                    <div class="mt-1">
-                        <a href="{rx_url}" target="_blank" class="text-decoration-none small">🔍 View Full File</a>
-                    </div>
-                </div>
-                '''
+            rx_list = v.get('prescriptions') or []
+            rx_section = render_attachments_gallery(rx_list, max_height="140px", show_large_link=False)
 
             visit_cards += f"""
             <div class="card shadow-sm mb-3">
                 <div class="card-body">
-                    <div class="d-flex justify-content-between align-items-center">
+                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
                         <h6 class="text-primary fw-bold mb-0">Visit Date: {visit_date}</h6>
                         <div>
                             <span class="badge bg-dark me-1">Fee: ₹{fee}</span>
@@ -977,6 +984,9 @@ def patient_profile(patient_id):
                     </div>
                     <p class="mt-2 mb-2" style="white-space: pre-line;"><strong>Notes:</strong> {v.get('notes', 'No notes recorded.')}</p>
                     {rx_section}
+                    <div class="mt-3 pt-2 border-top d-flex justify-content-end">
+                        <a href="/visit/{v['id']}/add-report" class="btn btn-sm btn-outline-primary">➕ Add Another Report / Scan to This Visit</a>
+                    </div>
                 </div>
             </div>
             """
@@ -1002,7 +1012,7 @@ def patient_profile(patient_id):
                     </div>
                 </form>
 
-                <a href="/visit/new/{patient['id']}" class="btn btn-success w-100 mb-2">🩺 Log New Visit, Scan & Fee</a>
+                <a href="/visit/new/{patient['id']}" class="btn btn-success w-100 mb-2">🩺 Log New Visit, Scans & Fee</a>
                 <a href="{wa_link}" target="_blank" class="btn btn-outline-success w-100 mb-2">📲 Share Records on WhatsApp</a>
                 <button type="button" onclick="copyShareLink()" class="btn btn-outline-primary w-100 mb-2">🔗 Copy Second-Opinion Link</button>
                 <a href="/patient/{patient['id']}/print" target="_blank" class="btn btn-outline-secondary w-100">🖨️ Print / Save PDF Summary</a>
@@ -1021,6 +1031,120 @@ def patient_profile(patient_id):
             setTimeout(() => {{ document.getElementById("copyAlert").style.display = "none"; }}, 3000);
         }}
     </script>
+    """
+    return render_page(body)
+
+
+@app.route('/visit/<int:visit_id>/add-report', methods=['GET', 'POST'])
+@login_required
+def add_report_to_visit(visit_id):
+    """Attaches one or more extra scans/reports to an existing visit without duplicating the visit or fee."""
+    uid = session.get('user_id')
+    if not uid:
+        return redirect(url_for('logout'))
+
+    try:
+        v_res = supabase.table('visits').select('*, patients(id, name)').eq('id', visit_id).eq('user_id', uid).execute()
+        if not v_res.data:
+            return "Visit not found or unauthorized access.", 404
+        visit = v_res.data[0]
+        patient_info = visit.get('patients') or {}
+        patient_id = patient_info.get('id') or visit.get('patient_id')
+        patient_name = patient_info.get('name', 'Patient')
+    except Exception as e:
+        return f"<div style='padding:20px;font-family:sans-serif;'><h3>Database Error</h3><p>{str(e)}</p><a href='/'>Back to Dashboard</a></div>", 500
+
+    error = None
+    if request.method == 'POST':
+        document_type = request.form.get('document_type', 'Lab Report')
+        files = request.files.getlist('prescription_files')
+        use_ai_ocr = request.form.get('use_ai_ocr')
+
+        valid_files = [f for f in files if f and f.filename != '']
+        if not valid_files:
+            error = "Please choose at least one report or scan file to attach."
+        else:
+            try:
+                existing_notes = (visit.get('notes') or '').strip()
+                existing_diag = (visit.get('diagnosis_tags') or '').strip()
+                appended_notes = []
+
+                for idx, file in enumerate(valid_files, 1):
+                    raw_bytes = file.read()
+                    raw_mime = file.content_type or 'image/jpeg'
+                    file_bytes, mime_type = compress_image_for_ocr(raw_bytes, raw_mime)
+
+                    if use_ai_ocr and file_bytes:
+                        ai_diag, ai_notes = extract_medical_file_with_ai(file_bytes, mime_type, document_type)
+                        if not existing_diag or existing_diag == "General Consultation":
+                            existing_diag = ai_diag
+                        appended_notes.append(f"--- Additional {document_type} (#{idx}: {file.filename}) ---\n{ai_notes}")
+
+                    filename = secure_filename(file.filename) or f"report_{idx}.jpg"
+                    file_path = f"visit_{visit_id}_{int(time.time())}_{idx}_{filename}"
+
+                    supabase.storage.from_('prescriptions').upload(
+                        file_path, file_bytes, {"content-type": mime_type}
+                    )
+                    public_url = supabase.storage.from_('prescriptions').get_public_url(file_path)
+
+                    supabase.table('prescriptions').insert({
+                        "visit_id": visit_id,
+                        "prescription_url": public_url,
+                        "document_type": document_type
+                    }).execute()
+
+                if appended_notes:
+                    joined_new = "\n\n".join(appended_notes)
+                    updated_notes = f"{existing_notes}\n\n{joined_new}" if existing_notes else joined_new
+                    supabase.table('visits').update({
+                        "diagnosis_tags": existing_diag,
+                        "notes": updated_notes
+                    }).eq('id', visit_id).eq('user_id', uid).execute()
+
+                return redirect(url_for('patient_profile', patient_id=patient_id))
+            except Exception as e:
+                error = f"Error attaching report: {str(e)}"
+
+    visit_date = visit.get('visit_date', visit.get('created_at', ''))[:10]
+
+    body = f"""
+    <div class="row justify-content-center">
+        <div class="col-md-7">
+            <div class="card shadow-sm p-4">
+                <h3 class="mb-1 text-primary">➕ Add Reports / Scans to Existing Visit</h3>
+                <p class="text-muted small mb-3">Patient: <strong>{patient_name}</strong> | Visit Date: <strong>{visit_date}</strong> (No extra fee will be charged)</p>
+                {f'<div class="alert alert-danger">{error}</div>' if error else ''}
+                <form method="POST" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <label class="form-label">Document Type</label>
+                        <select name="document_type" class="form-select">
+                            <option value="Lab Report">Blood / Lab Report</option>
+                            <option value="Ultrasound">Ultrasound / Echo</option>
+                            <option value="X-Ray">X-Ray / Bone Scan</option>
+                            <option value="MRI">MRI / CT Scan</option>
+                            <option value="Prescription">Prescription</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Select One or Multiple Files (Images / PDFs)</label>
+                        <input type="file" name="prescription_files" class="form-control" accept="image/*,.pdf" multiple required>
+                        <div class="form-text">Hold <strong>Ctrl</strong> (or select multiple photos on phone) to attach all pages/reports at once.</div>
+                        <div class="form-check mt-2">
+                            <input class="form-check-input" type="checkbox" name="use_ai_ocr" id="use_ai_ocr" value="1" checked>
+                            <label class="form-check-label fw-semibold text-success" for="use_ai_ocr">
+                                🤖 Extract & Append Findings with Gemini AI Vision
+                            </label>
+                        </div>
+                    </div>
+                    <div class="d-flex gap-2">
+                        <a href="/patient/{patient_id}" class="btn btn-outline-secondary w-50">Cancel</a>
+                        <button type="submit" class="btn btn-primary w-50">Attach Reports to Visit</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
     """
     return render_page(body)
 
@@ -1045,21 +1169,8 @@ def public_patient_share(patient_id, token):
     if visits:
         for v in visits:
             visit_date = v.get('visit_date', v.get('created_at', ''))[:10]
-            rx_section = ""
-            if v.get('prescriptions'):
-                rx = v['prescriptions'][0]
-                rx_url = rx['prescription_url']
-                doc_type = rx.get('document_type', 'Prescription')
-                if rx_url.lower().endswith('.pdf'):
-                    preview_element = f'<a href="{rx_url}" target="_blank" class="btn btn-sm btn-primary">📄 Download / View PDF ({doc_type})</a>'
-                else:
-                    preview_element = f'''
-                    <a href="{rx_url}" target="_blank">
-                        <img src="{rx_url}" alt="{doc_type}" class="img-thumbnail" style="max-height: 220px; object-fit: contain;">
-                    </a>
-                    <div class="mt-1"><a href="{rx_url}" target="_blank" class="small fw-semibold">🔍 Open High-Resolution Scan / Report</a></div>
-                    '''
-                rx_section = f'<div class="mt-3"><span class="badge bg-secondary mb-2">{doc_type}</span><div>{preview_element}</div></div>'
+            rx_list = v.get('prescriptions') or []
+            rx_section = render_attachments_gallery(rx_list, max_height="200px", show_large_link=True)
 
             visit_cards += f"""
             <div class="card shadow-sm mb-3">
@@ -1139,20 +1250,19 @@ def print_patient_summary(patient_id):
             fee = v.get('consultation_fee', 0)
             pay_status = v.get('payment_status', 'Paid')
             rx_html = ""
-            if v.get('prescriptions'):
-                rx = v['prescriptions'][0]
+            for idx, rx in enumerate(v.get('prescriptions') or [], 1):
                 rx_url = rx['prescription_url']
                 doc_type = rx.get('document_type', 'Prescription')
                 if not rx_url.lower().endswith('.pdf'):
-                    rx_html = f'<div style="margin-top: 10px;"><p><strong>[{doc_type}]</strong></p><img src="{rx_url}" style="max-width: 300px; border: 1px solid #ccc; padding: 5px;" alt="Scan"></div>'
+                    rx_html += f'<div style="display:inline-block; margin: 10px 10px 0 0; vertical-align:top;"><p class="mb-1"><strong>[{doc_type} #{idx}]</strong></p><img src="{rx_url}" style="max-width: 240px; border: 1px solid #ccc; padding: 4px;" alt="Scan"></div>'
                 else:
-                    rx_html = f'<div style="margin-top: 10px;"><p><strong>[{doc_type}]</strong> - <a href="{rx_url}" target="_blank">View PDF Document</a></p></div>'
+                    rx_html += f'<div style="margin-top: 8px;"><p class="mb-1"><strong>[{doc_type} #{idx}]</strong> - <a href="{rx_url}" target="_blank">View PDF Document</a></p></div>'
 
             visit_rows += f"""
             <div style="border-bottom: 1px solid #ddd; padding-bottom: 15px; margin-bottom: 15px;">
                 <p><strong>Date:</strong> {visit_date} | <strong>Diagnosis:</strong> {v.get('diagnosis_tags', 'N/A')} | <strong>Fee:</strong> ₹{fee} ({pay_status})</p>
                 <p style="white-space: pre-line;"><strong>Notes:</strong> {v.get('notes', 'No notes.')}</p>
-                {rx_html}
+                <div>{rx_html}</div>
             </div>
             """
     else:
@@ -1221,55 +1331,62 @@ def log_visit(patient_id):
 
     error = None
     if request.method == 'POST':
-        diagnosis = request.form.get('diagnosis')
-        notes = request.form.get('notes')
+        diagnosis = (request.form.get('diagnosis') or '').strip()
+        notes = (request.form.get('notes') or '').strip()
         document_type = request.form.get('document_type', 'Prescription')
         fee = request.form.get('consultation_fee', 0)
         payment_status = request.form.get('payment_status', 'Paid')
-        file = request.files.get('prescription_file')
+        files = request.files.getlist('prescription_files')
         use_ai_ocr = request.form.get('use_ai_ocr')
 
+        valid_files = [f for f in files if f and f.filename != '']
+
         try:
-            file_bytes = None
-            mime_type = None
-            if file and file.filename != '':
+            processed_files = []
+            ai_summaries = []
+
+            for idx, file in enumerate(valid_files, 1):
                 raw_bytes = file.read()
                 raw_mime = file.content_type or 'image/jpeg'
                 file_bytes, mime_type = compress_image_for_ocr(raw_bytes, raw_mime)
+                processed_files.append((idx, file.filename, file_bytes, mime_type))
 
-            if use_ai_ocr and file_bytes:
-                ai_diag, ai_notes = extract_medical_file_with_ai(file_bytes, mime_type, document_type)
-                if not diagnosis or diagnosis.strip() == "":
-                    diagnosis = ai_diag
-                if not notes or notes.strip() == "":
-                    notes = ai_notes
-                else:
-                    notes = f"{notes}\n\n--- AI OCR Extracted Report ---\n{ai_notes}"
+                if use_ai_ocr and file_bytes:
+                    ai_diag, ai_notes = extract_medical_file_with_ai(file_bytes, mime_type, document_type)
+                    if not diagnosis:
+                        diagnosis = ai_diag
+                    label = f"Report #{idx} ({file.filename})" if len(valid_files) > 1 else "AI OCR Extracted Report"
+                    ai_summaries.append(f"--- {label} ---\n{ai_notes}")
+
+            if ai_summaries:
+                combined_ai = "\n\n".join(ai_summaries)
+                notes = f"{notes}\n\n{combined_ai}" if notes else combined_ai
 
             v_res = supabase.table('visits').insert({
                 "user_id": uid,
                 "patient_id": patient_id,
-                "diagnosis_tags": diagnosis,
+                "diagnosis_tags": diagnosis or "General Consultation",
                 "notes": notes,
                 "consultation_fee": float(fee) if fee else 0,
                 "payment_status": payment_status
             }).execute()
 
-            if v_res.data and file and file_bytes:
+            if v_res.data and processed_files:
                 visit_id = v_res.data[0]['id']
-                filename = secure_filename(file.filename) or "scan.jpg"
-                file_path = f"visit_{visit_id}_{int(time.time())}_{filename}"
+                for idx, orig_name, file_bytes, mime_type in processed_files:
+                    filename = secure_filename(orig_name) or f"scan_{idx}.jpg"
+                    file_path = f"visit_{visit_id}_{int(time.time())}_{idx}_{filename}"
 
-                supabase.storage.from_('prescriptions').upload(
-                    file_path, file_bytes, {"content-type": mime_type}
-                )
-                public_url = supabase.storage.from_('prescriptions').get_public_url(file_path)
+                    supabase.storage.from_('prescriptions').upload(
+                        file_path, file_bytes, {"content-type": mime_type}
+                    )
+                    public_url = supabase.storage.from_('prescriptions').get_public_url(file_path)
 
-                supabase.table('prescriptions').insert({
-                    "visit_id": visit_id,
-                    "prescription_url": public_url,
-                    "document_type": document_type
-                }).execute()
+                    supabase.table('prescriptions').insert({
+                        "visit_id": visit_id,
+                        "prescription_url": public_url,
+                        "document_type": document_type
+                    }).execute()
 
             return redirect(url_for('patient_profile', patient_id=patient_id))
         except Exception as e:
@@ -1279,33 +1396,34 @@ def log_visit(patient_id):
     <div class="row justify-content-center">
         <div class="col-md-7">
             <div class="card shadow-sm p-4">
-                <h3 class="mb-3 text-primary">Log Visit, Scan & AI OCR for {patient_name}</h3>
+                <h3 class="mb-3 text-primary">Log Visit, Scans & AI OCR for {patient_name}</h3>
                 {f'<div class="alert alert-danger">{error}</div>' if error else ''}
                 <form method="POST" enctype="multipart/form-data">
                     <div class="mb-3">
-                        <label class="form-label">Document Type</label>
+                        <label class="form-label">Primary Document Type</label>
                         <select name="document_type" class="form-select">
                             <option value="Prescription">Prescription</option>
-                            <option value="X-Ray">X-Ray / Bone Scan</option>
-                            <option value="Ultrasound">Ultrasound / Echo</option>
-                            <option value="MRI">MRI / CT Scan</option>
                             <option value="Lab Report">Blood / Lab Report</option>
+                            <option value="Ultrasound">Ultrasound / Echo</option>
+                            <option value="X-Ray">X-Ray / Bone Scan</option>
+                            <option value="MRI">MRI / CT Scan</option>
                         </select>
                         <div class="form-text">Selecting X-Ray, Ultrasound, or MRI automatically adds a preliminary radiologist verification reminder.</div>
                     </div>
                     <div class="mb-3">
-                        <label class="form-label">Upload Scan Image or PDF Report</label>
-                        <input type="file" name="prescription_file" id="prescription_file" class="form-control" accept="image/*,.pdf">
+                        <label class="form-label">Upload One or Multiple Scan Images / PDF Reports</label>
+                        <input type="file" name="prescription_files" id="prescription_files" class="form-control" accept="image/*,.pdf" multiple>
+                        <div class="form-text">Select all reports for this visit together (hold <strong>Ctrl</strong> on PC or tap multiple photos on phone). You can also add more reports later from the visit card.</div>
                         <div class="form-check mt-2">
                             <input class="form-check-input" type="checkbox" name="use_ai_ocr" id="use_ai_ocr" value="1" checked>
                             <label class="form-check-label fw-semibold text-success" for="use_ai_ocr">
-                                🤖 Automatically Extract Diagnosis & Notes using Gemini AI Vision
+                                🤖 Automatically Extract Diagnosis & Notes from All Uploaded Reports
                             </label>
                         </div>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">Diagnosis / Symptoms (Optional if AI OCR is checked)</label>
-                        <input type="text" name="diagnosis" class="form-control" placeholder="e.g. Fever, Cough or let AI fill this">
+                        <input type="text" name="diagnosis" class="form-control" placeholder="e.g. Fever, Gall bladder stone or let AI fill this">
                     </div>
                     <div class="mb-3">
                         <label class="form-label">Clinical Notes / Prescription Details</label>
@@ -1324,7 +1442,7 @@ def log_visit(patient_id):
                             </select>
                         </div>
                     </div>
-                    <button type="submit" class="btn btn-primary w-100">Save Consultation & Process AI OCR</button>
+                    <button type="submit" class="btn btn-primary w-100">Save Consultation & Process All Reports</button>
                 </form>
             </div>
         </div>
