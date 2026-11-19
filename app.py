@@ -1,4 +1,5 @@
 import os
+import io
 import time
 import hmac
 import hashlib
@@ -7,6 +8,7 @@ import urllib.parse
 import requests
 from datetime import date
 from functools import wraps
+from PIL import Image
 from flask import Flask, redirect, render_template_string, request, session, url_for
 from supabase import Client, create_client
 from werkzeug.utils import secure_filename
@@ -67,11 +69,29 @@ def format_whatsapp_phone(phone):
     return digits
 
 
+def compress_image_for_ocr(file_bytes, mime_type):
+    """Resizes large phone photos to max 1600px JPEG to prevent Render OOM and speed up OCR."""
+    if not mime_type or not mime_type.startswith("image/"):
+        return file_bytes, mime_type
+    try:
+        img = Image.open(io.BytesIO(file_bytes))
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        img.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85, optimize=True)
+        return buf.getvalue(), "image/jpeg"
+    except Exception:
+        return file_bytes, mime_type
+
+
 def extract_medical_file_with_ai(file_bytes, mime_type, document_type="Prescription"):
     """Scan-aware medical OCR with radiology observation disclaimer for imaging scans."""
     api_key = get_active_gemini_key()
     if not api_key:
         return "AI API Key not configured.", "OCR skipped. Please verify GEMINI_API_KEY in server environment."
+
+    file_bytes, mime_type = compress_image_for_ocr(file_bytes, mime_type)
 
     imaging_types = {"X-Ray", "Ultrasound", "MRI"}
     is_imaging_scan = document_type in imaging_types
@@ -1186,12 +1206,18 @@ def print_patient_summary(patient_id):
 @app.route('/visit/new/<int:patient_id>', methods=['GET', 'POST'])
 @login_required
 def log_visit(patient_id):
-    uid = session['user_id']
-    p_res = supabase.table('patients').select('*').eq('id', patient_id).eq('user_id', uid).execute()
-    if not p_res.data:
-        return "Patient not found or unauthorized access.", 404
-    patient = p_res.data[0]
-    patient_name = patient['name']
+    uid = session.get('user_id')
+    if not uid:
+        return redirect(url_for('logout'))
+
+    try:
+        p_res = supabase.table('patients').select('*').eq('id', patient_id).eq('user_id', uid).execute()
+        if not p_res.data:
+            return "Patient not found or unauthorized access.", 404
+        patient = p_res.data[0]
+        patient_name = patient['name']
+    except Exception as e:
+        return f"<div style='padding:20px;font-family:sans-serif;'><h3>Database Error</h3><p>{str(e)}</p><a href='/'>Back to Dashboard</a></div>", 500
 
     error = None
     if request.method == 'POST':
@@ -1207,8 +1233,9 @@ def log_visit(patient_id):
             file_bytes = None
             mime_type = None
             if file and file.filename != '':
-                file_bytes = file.read()
-                mime_type = file.content_type or 'image/jpeg'
+                raw_bytes = file.read()
+                raw_mime = file.content_type or 'image/jpeg'
+                file_bytes, mime_type = compress_image_for_ocr(raw_bytes, raw_mime)
 
             if use_ai_ocr and file_bytes:
                 ai_diag, ai_notes = extract_medical_file_with_ai(file_bytes, mime_type, document_type)
