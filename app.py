@@ -37,6 +37,22 @@ def get_active_gemini_key():
     return ""
 
 
+def get_clinic_info(user_id):
+    """Fetches clinic and doctor display details for a given user_id."""
+    if not user_id:
+        return {"clinic_name": "ClinicDesk", "doctor_name": "Doctor"}
+    try:
+        res = supabase.table('clinics').select('*').eq('user_id', user_id).execute()
+        if res.data:
+            return {
+                "clinic_name": res.data[0].get("clinic_name") or "ClinicDesk",
+                "doctor_name": res.data[0].get("doctor_name") or "Doctor"
+            }
+    except Exception:
+        pass
+    return {"clinic_name": "ClinicDesk", "doctor_name": "Doctor"}
+
+
 def generate_share_token(patient_id, phone):
     """Generates a deterministic, unguessable read-only share token per patient."""
     raw = f"{patient_id}:{phone}".encode("utf-8")
@@ -51,11 +67,28 @@ def format_whatsapp_phone(phone):
     return digits
 
 
-def extract_medical_file_with_ai(file_bytes, mime_type):
-    """Fast medical OCR with 90s timeout and active Gemini 3.8/3.5 Flash models."""
+def extract_medical_file_with_ai(file_bytes, mime_type, document_type="Prescription"):
+    """Scan-aware medical OCR with radiology observation disclaimer for imaging scans."""
     api_key = get_active_gemini_key()
     if not api_key:
         return "AI API Key not configured.", "OCR skipped. Please verify GEMINI_API_KEY in server environment."
+
+    imaging_types = {"X-Ray", "Ultrasound", "MRI"}
+    is_imaging_scan = document_type in imaging_types
+
+    if is_imaging_scan:
+        prompt_text = (
+            f"You are assisting a physician reviewing a {document_type} image or report. "
+            "Extract visible anatomical observations, printed film labels, measurements, or report text strictly in two sections:\n"
+            "DIAGNOSIS: [Scan region / suspected finding or impression]\n"
+            "NOTES: [Detailed visual observations, measurements, and printed text clearly]"
+        )
+    else:
+        prompt_text = (
+            f"Extract the medical details from this {document_type} strictly in two sections:\n"
+            "DIAGNOSIS: [Suspected condition, symptoms, or test names]\n"
+            "NOTES: [All medications, dosages, lab values, and doctor instructions clearly]"
+        )
 
     headers = {
         "Content-Type": "application/json",
@@ -67,13 +100,7 @@ def extract_medical_file_with_ai(file_bytes, mime_type):
         "contents": [
             {
                 "parts": [
-                    {
-                        "text": (
-                            "Extract the medical details from this document strictly in two sections:\n"
-                            "DIAGNOSIS: [Suspected condition, symptoms, or test names]\n"
-                            "NOTES: [All medications, dosages, lab values, and doctor instructions clearly]"
-                        )
-                    },
+                    {"text": prompt_text},
                     {
                         "inline_data": {
                             "mime_type": mime_type,
@@ -106,6 +133,9 @@ def extract_medical_file_with_ai(file_bytes, mime_type):
                         diagnosis = diag_part[:100]
                     notes = parts[1].strip()
 
+                if is_imaging_scan:
+                    notes = f"⚠️ [AI Preliminary Image Observation — Verify with Radiologist Report]\n{notes}"
+
                 return diagnosis, notes
 
             err_msg = result.get("error", {}).get("message", str(result))
@@ -120,15 +150,16 @@ def extract_medical_file_with_ai(file_bytes, mime_type):
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if 'user' not in session:
+        if 'user' not in session or 'user_id' not in session:
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
 
 
 def render_page(body_content, **kwargs):
+    clinic_brand = session.get('clinic_name', 'ClinicDesk')
     nav_links = ""
-    if 'user' in session:
+    if 'user' in session and 'user_id' in session:
         nav_links = """
             <a href="/" class="btn btn-outline-light btn-sm me-2">Dashboard</a>
             <a href="/appointments" class="btn btn-outline-light btn-sm me-2">📅 Appointments</a>
@@ -137,6 +168,11 @@ def render_page(body_content, **kwargs):
             <a href="/register" class="btn btn-outline-light btn-sm me-2">Register Patient</a>
             <a href="/logout" class="btn btn-danger btn-sm">Logout</a>
         """
+    else:
+        nav_links = """
+            <a href="/login" class="btn btn-outline-light btn-sm me-2">Doctor Login</a>
+            <a href="/signup" class="btn btn-light btn-sm text-primary fw-semibold">Register New Clinic</a>
+        """
 
     html = f"""
     <!DOCTYPE html>
@@ -144,13 +180,13 @@ def render_page(body_content, **kwargs):
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>ClinicDesk SaaS</title>
+        <title>{clinic_brand} | ClinicDesk SaaS</title>
         <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     </head>
     <body class="bg-light">
         <nav class="navbar navbar-dark bg-primary shadow-sm mb-4">
             <div class="container">
-                <a class="navbar-brand fw-bold" href="/">🏥 ClinicDesk</a>
+                <a class="navbar-brand fw-bold" href="/">🏥 {clinic_brand}</a>
                 <div>
                     {nav_links}
                 </div>
@@ -165,9 +201,89 @@ def render_page(body_content, **kwargs):
     return render_template_string(html, **kwargs)
 
 
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    error = None
+    if request.method == 'POST':
+        clinic_name = request.form.get('clinic_name', '').strip()
+        doctor_name = request.form.get('doctor_name', '').strip()
+        phone = request.form.get('phone', '').strip()
+        email = request.form.get('email', '').strip()
+        password = request.form.get('password', '')
+
+        try:
+            response = supabase.auth.sign_up({
+                "email": email,
+                "password": password
+            })
+            if response.user:
+                user_id = str(response.user.id)
+                supabase.table('clinics').insert({
+                    "user_id": user_id,
+                    "clinic_name": clinic_name,
+                    "doctor_name": doctor_name,
+                    "phone": phone
+                }).execute()
+
+                if response.session:
+                    session['user'] = email
+                    session['user_id'] = user_id
+                    session['clinic_name'] = clinic_name
+                    session['doctor_name'] = doctor_name
+                    return redirect(url_for('index'))
+                else:
+                    return redirect(url_for('login', registered='1'))
+            else:
+                error = "Unable to create account. Please check your details and try again."
+        except Exception as e:
+            error = f"Registration failed: {str(e)}"
+
+    body = f"""
+    <div class="row justify-content-center mt-4">
+        <div class="col-md-6">
+            <div class="card shadow-sm p-4">
+                <h3 class="mb-2 text-primary text-center">🏥 Register New Clinic Account</h3>
+                <p class="text-muted text-center small mb-4">Create an isolated workspace for your clinic's patients, appointments & AI scans.</p>
+                {f'<div class="alert alert-danger">{error}</div>' if error else ''}
+                <form method="POST">
+                    <div class="mb-3">
+                        <label class="form-label">Clinic / Hospital Name</label>
+                        <input type="text" name="clinic_name" class="form-control" placeholder="e.g. Sharma Polyclinic & Diagnostics" required>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Doctor Full Name</label>
+                            <input type="text" name="doctor_name" class="form-control" placeholder="e.g. Dr. R. K. Sharma" required>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Clinic Phone Number</label>
+                            <input type="text" name="phone" class="form-control" placeholder="e.g. 981020XXXX" required>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Login Email</label>
+                        <input type="email" name="email" class="form-control" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Create Password (Min 6 characters)</label>
+                        <input type="password" name="password" class="form-control" minlength="6" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100">Create Clinic Workspace</button>
+                </form>
+                <div class="text-center mt-3 small">
+                    Already have a clinic account? <a href="/login">Login here</a>
+                </div>
+            </div>
+        </div>
+    </div>
+    """
+    return render_page(body)
+
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     error = None
+    registered = request.args.get('registered')
     if request.method == 'POST':
         email = request.form.get('email')
         password = request.form.get('password')
@@ -178,16 +294,22 @@ def login():
                 "password": password
             })
             if response.user:
+                user_id = str(response.user.id)
+                info = get_clinic_info(user_id)
                 session['user'] = email
+                session['user_id'] = user_id
+                session['clinic_name'] = info['clinic_name']
+                session['doctor_name'] = info['doctor_name']
                 return redirect(url_for('index'))
         except Exception:
-            error = "Invalid email or password. Please verify your Supabase Auth credentials."
+            error = "Invalid email or password. Please verify your credentials."
 
     body = f"""
     <div class="row justify-content-center mt-5">
         <div class="col-md-5">
             <div class="card shadow-sm p-4">
                 <h3 class="mb-3 text-primary text-center">🏥 ClinicDesk Login</h3>
+                {'<div class="alert alert-success">Clinic account created! Please log in below.</div>' if registered else ''}
                 {f'<div class="alert alert-danger">{error}</div>' if error else ''}
                 <form method="POST">
                     <div class="mb-3">
@@ -200,6 +322,9 @@ def login():
                     </div>
                     <button type="submit" class="btn btn-primary w-100">Login to ClinicDesk</button>
                 </form>
+                <div class="text-center mt-3 small">
+                    New clinic or doctor? <a href="/signup">Register a new clinic account</a>
+                </div>
             </div>
         </div>
     </div>
@@ -209,7 +334,7 @@ def login():
 
 @app.route('/logout')
 def logout():
-    session.pop('user', None)
+    session.clear()
     try:
         supabase.auth.sign_out()
     except Exception:
@@ -220,14 +345,18 @@ def logout():
 @app.route('/')
 @login_required
 def index():
+    uid = session['user_id']
+    clinic_name = session.get('clinic_name', 'ClinicDesk')
+    doctor_name = session.get('doctor_name', 'Doctor')
+
     try:
-        p_res = supabase.table('patients').select('id', count='exact').execute()
+        p_res = supabase.table('patients').select('id', count='exact').eq('user_id', uid).execute()
         total_patients = p_res.count if p_res.count is not None else len(p_res.data)
     except Exception:
         total_patients = 0
 
     try:
-        v_res = supabase.table('visits').select('id, consultation_fee, payment_status').execute()
+        v_res = supabase.table('visits').select('id, consultation_fee, payment_status').eq('user_id', uid).execute()
         visits_data = v_res.data if v_res.data else []
         total_visits = len(visits_data)
         total_revenue = sum([float(v.get('consultation_fee') or 0) for v in visits_data if v.get('payment_status') == 'Paid'])
@@ -237,13 +366,13 @@ def index():
 
     today_str = str(date.today())
     try:
-        a_res = supabase.table('appointments').select('id', count='exact').eq('appointment_date', today_str).execute()
+        a_res = supabase.table('appointments').select('id', count='exact').eq('user_id', uid).eq('appointment_date', today_str).execute()
         today_appts = a_res.count if a_res.count is not None else len(a_res.data)
     except Exception:
         today_appts = 0
 
     try:
-        recent_res = supabase.table('patients').select('*').order('created_at', desc=True).limit(5).execute()
+        recent_res = supabase.table('patients').select('*').eq('user_id', uid).order('created_at', desc=True).limit(5).execute()
         recent_patients = recent_res.data if recent_res.data else []
     except Exception:
         recent_patients = []
@@ -262,13 +391,13 @@ def index():
             </tr>
             """
     else:
-        recent_rows = '<tr><td colspan="5" class="text-center text-muted py-3">No recent patients registered.</td></tr>'
+        recent_rows = '<tr><td colspan="5" class="text-center text-muted py-3">No recent patients registered yet.</td></tr>'
 
     body = f"""
     <div class="row mb-4">
         <div class="col-md-12">
-            <h2 class="fw-bold text-primary">🏥 ClinicDesk Doctor Dashboard</h2>
-            <p class="text-muted">Welcome back! Here is your clinic's live operational overview for today ({today_str}).</p>
+            <h2 class="fw-bold text-primary">🏥 {clinic_name} — Doctor Dashboard</h2>
+            <p class="text-muted">Welcome back, <strong>{doctor_name}</strong>! Here is your clinic's live operational overview for today ({today_str}).</p>
         </div>
     </div>
 
@@ -349,8 +478,9 @@ def index():
 @app.route('/revenue')
 @login_required
 def revenue_reports():
+    uid = session['user_id']
     try:
-        res = supabase.table('visits').select('*, patients(id, name, phone)').order('created_at', desc=True).execute()
+        res = supabase.table('visits').select('*, patients(id, name, phone)').eq('user_id', uid).order('created_at', desc=True).execute()
         visits = res.data if res.data else []
     except Exception:
         visits = []
@@ -460,6 +590,7 @@ def revenue_reports():
 @app.route('/appointments', methods=['GET', 'POST'])
 @login_required
 def appointments_queue():
+    uid = session['user_id']
     selected_date = request.args.get('date', str(date.today()))
     error = None
     success = None
@@ -474,6 +605,7 @@ def appointments_queue():
 
             try:
                 supabase.table('appointments').insert({
+                    "user_id": uid,
                     "patient_id": int(patient_id),
                     "appointment_date": appt_date,
                     "time_slot": time_slot,
@@ -487,14 +619,14 @@ def appointments_queue():
             appt_id = request.form.get('appointment_id')
             new_status = request.form.get('status')
             try:
-                supabase.table('appointments').update({"status": new_status}).eq('id', appt_id).execute()
+                supabase.table('appointments').update({"status": new_status}).eq('id', appt_id).eq('user_id', uid).execute()
             except Exception as e:
                 error = f"Error updating status: {str(e)}"
 
-    p_res = supabase.table('patients').select('id, name, phone').order('name').execute()
+    p_res = supabase.table('patients').select('id, name, phone').eq('user_id', uid).order('name').execute()
     patients = p_res.data if p_res.data else []
 
-    a_res = supabase.table('appointments').select('*, patients(name, phone, id)').eq('appointment_date', selected_date).order('created_at').execute()
+    a_res = supabase.table('appointments').select('*, patients(name, phone, id)').eq('user_id', uid).eq('appointment_date', selected_date).order('created_at').execute()
     appointments = a_res.data if a_res.data else []
 
     patient_options = "".join([f'<option value="{p["id"]}">{p["name"]} ({p["phone"]})</option>' for p in patients])
@@ -608,6 +740,7 @@ def appointments_queue():
 @app.route('/register', methods=['GET', 'POST'])
 @login_required
 def register_patient():
+    uid = session['user_id']
     error = None
     if request.method == 'POST':
         name = request.form.get('name')
@@ -617,6 +750,7 @@ def register_patient():
         gender = request.form.get('gender')
 
         payload = {
+            "user_id": uid,
             "name": name,
             "phone": phone,
             "age": int(age) if age else None,
@@ -680,13 +814,20 @@ def register_patient():
 @app.route('/search', methods=['GET'])
 @login_required
 def search_patients():
+    uid = session['user_id']
     query = request.args.get('q', '')
     patients = []
     if query:
-        res = supabase.table('patients').select('*').or_(f"name.ilike.%{query}%,phone.ilike.%{query}%,abha_id.ilike.%{query}%").execute()
+        res = (
+            supabase.table('patients')
+            .select('*')
+            .eq('user_id', uid)
+            .or_(f"name.ilike.%{query}%,phone.ilike.%{query}%,abha_id.ilike.%{query}%")
+            .execute()
+        )
         patients = res.data
     else:
-        res = supabase.table('patients').select('*').order('created_at', desc=True).limit(15).execute()
+        res = supabase.table('patients').select('*').eq('user_id', uid).order('created_at', desc=True).limit(15).execute()
         patients = res.data
 
     rows = ""
@@ -742,17 +883,18 @@ def search_patients():
 @app.route('/patient/<int:patient_id>', methods=['GET', 'POST'])
 @login_required
 def patient_profile(patient_id):
+    uid = session['user_id']
     if request.method == 'POST' and request.form.get('action') == 'update_abha':
         new_abha = request.form.get('abha_id', '').strip()
         try:
-            supabase.table('patients').update({"abha_id": new_abha or None}).eq('id', patient_id).execute()
+            supabase.table('patients').update({"abha_id": new_abha or None}).eq('id', patient_id).eq('user_id', uid).execute()
         except Exception:
             pass
         return redirect(url_for('patient_profile', patient_id=patient_id))
 
-    p_res = supabase.table('patients').select('*').eq('id', patient_id).execute()
+    p_res = supabase.table('patients').select('*').eq('id', patient_id).eq('user_id', uid).execute()
     if not p_res.data:
-        return "Patient not found", 404
+        return "Patient not found or unauthorized access.", 404
     patient = p_res.data[0]
 
     v_res = supabase.table('visits').select('*, prescriptions(*)').eq('patient_id', patient_id).order('created_at', desc=True).execute()
@@ -761,9 +903,10 @@ def patient_profile(patient_id):
     token = generate_share_token(patient['id'], patient['phone'])
     share_url = url_for('public_patient_share', patient_id=patient['id'], token=token, _external=True)
     wa_phone = format_whatsapp_phone(patient['phone'])
+    clinic_name = session.get('clinic_name', 'ClinicDesk')
     wa_message = (
         f"Hello {patient['name']},\n"
-        f"Here is your digital medical record & scan summary from ClinicDesk. "
+        f"Here is your digital medical record & scan summary from {clinic_name}. "
         f"You can view or share this link with any doctor for a second opinion:\n{share_url}"
     )
     wa_link = f"https://wa.me/{wa_phone}?text={urllib.parse.quote(wa_message)}"
@@ -874,6 +1017,7 @@ def public_patient_share(patient_id, token):
     if not hmac.compare_digest(token, expected_token):
         return "Invalid or expired share link.", 403
 
+    clinic_info = get_clinic_info(patient.get('user_id'))
     v_res = supabase.table('visits').select('*, prescriptions(*)').eq('patient_id', patient_id).order('created_at', desc=True).execute()
     visits = v_res.data
 
@@ -926,7 +1070,7 @@ def public_patient_share(patient_id, token):
     <body class="bg-light">
         <nav class="navbar navbar-dark bg-primary shadow-sm mb-4">
             <div class="container">
-                <span class="navbar-brand fw-bold">🏥 ClinicDesk Digital Health Record</span>
+                <span class="navbar-brand fw-bold">🏥 {clinic_info['clinic_name']} — Digital Health Record</span>
                 <button onclick="window.print()" class="btn btn-outline-light btn-sm">🖨️ Print / Save PDF</button>
             </div>
         </nav>
@@ -938,7 +1082,10 @@ def public_patient_share(patient_id, token):
                         <p class="mb-1"><strong>Age:</strong> {patient.get('age', 'N/A')} | <strong>Gender:</strong> {patient.get('gender', 'N/A')}</p>
                         {abha_line}
                     </div>
-                    <span class="badge bg-success">Verified Digital Record</span>
+                    <div class="text-end">
+                        <span class="badge bg-success mb-1">Verified Digital Record</span>
+                        <div class="small text-muted">Consulting: {clinic_info['doctor_name']}</div>
+                    </div>
                 </div>
             </div>
             <h5 class="mb-3 text-secondary">Medical History, Prescriptions & Diagnostic Scans</h5>
@@ -953,7 +1100,11 @@ def public_patient_share(patient_id, token):
 @app.route('/patient/<int:patient_id>/print')
 @login_required
 def print_patient_summary(patient_id):
-    p_res = supabase.table('patients').select('*').eq('id', patient_id).execute()
+    uid = session['user_id']
+    clinic_name = session.get('clinic_name', 'ClinicDesk')
+    doctor_name = session.get('doctor_name', 'Doctor')
+
+    p_res = supabase.table('patients').select('*').eq('id', patient_id).eq('user_id', uid).execute()
     if not p_res.data:
         return "Patient not found", 404
     patient = p_res.data[0]
@@ -1007,8 +1158,8 @@ def print_patient_summary(patient_id):
         <div class="container">
             <div class="d-flex justify-content-between align-items-center border-bottom pb-3 mb-4">
                 <div>
-                    <h2>🏥 ClinicDesk - Patient Medical & Billing Summary</h2>
-                    <p class="text-muted mb-0">Generated via ClinicDesk SaaS</p>
+                    <h2>🏥 {clinic_name} — Patient Summary</h2>
+                    <p class="text-muted mb-0">Attending Physician: {doctor_name} | Powered by ClinicDesk</p>
                 </div>
                 <button onclick="window.print()" class="btn btn-primary no-print">🖨️ Print / Save PDF</button>
             </div>
@@ -1035,6 +1186,13 @@ def print_patient_summary(patient_id):
 @app.route('/visit/new/<int:patient_id>', methods=['GET', 'POST'])
 @login_required
 def log_visit(patient_id):
+    uid = session['user_id']
+    p_res = supabase.table('patients').select('*').eq('id', patient_id).eq('user_id', uid).execute()
+    if not p_res.data:
+        return "Patient not found or unauthorized access.", 404
+    patient = p_res.data[0]
+    patient_name = patient['name']
+
     error = None
     if request.method == 'POST':
         diagnosis = request.form.get('diagnosis')
@@ -1053,7 +1211,7 @@ def log_visit(patient_id):
                 mime_type = file.content_type or 'image/jpeg'
 
             if use_ai_ocr and file_bytes:
-                ai_diag, ai_notes = extract_medical_file_with_ai(file_bytes, mime_type)
+                ai_diag, ai_notes = extract_medical_file_with_ai(file_bytes, mime_type, document_type)
                 if not diagnosis or diagnosis.strip() == "":
                     diagnosis = ai_diag
                 if not notes or notes.strip() == "":
@@ -1062,6 +1220,7 @@ def log_visit(patient_id):
                     notes = f"{notes}\n\n--- AI OCR Extracted Report ---\n{ai_notes}"
 
             v_res = supabase.table('visits').insert({
+                "user_id": uid,
                 "patient_id": patient_id,
                 "diagnosis_tags": diagnosis,
                 "notes": notes,
@@ -1089,10 +1248,6 @@ def log_visit(patient_id):
         except Exception as e:
             error = f"Error saving consultation: {str(e)}"
 
-    p_res = supabase.table('patients').select('*').eq('id', patient_id).execute()
-    patient = p_res.data[0] if p_res.data else None
-    patient_name = patient['name'] if patient else 'Patient'
-
     body = f"""
     <div class="row justify-content-center">
         <div class="col-md-7">
@@ -1100,6 +1255,17 @@ def log_visit(patient_id):
                 <h3 class="mb-3 text-primary">Log Visit, Scan & AI OCR for {patient_name}</h3>
                 {f'<div class="alert alert-danger">{error}</div>' if error else ''}
                 <form method="POST" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <label class="form-label">Document Type</label>
+                        <select name="document_type" class="form-select">
+                            <option value="Prescription">Prescription</option>
+                            <option value="X-Ray">X-Ray / Bone Scan</option>
+                            <option value="Ultrasound">Ultrasound / Echo</option>
+                            <option value="MRI">MRI / CT Scan</option>
+                            <option value="Lab Report">Blood / Lab Report</option>
+                        </select>
+                        <div class="form-text">Selecting X-Ray, Ultrasound, or MRI automatically adds a preliminary radiologist verification reminder.</div>
+                    </div>
                     <div class="mb-3">
                         <label class="form-label">Upload Scan Image or PDF Report</label>
                         <input type="file" name="prescription_file" id="prescription_file" class="form-control" accept="image/*,.pdf">
@@ -1130,16 +1296,6 @@ def log_visit(patient_id):
                                 <option value="Pending">Pending</option>
                             </select>
                         </div>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">Document Type</label>
-                        <select name="document_type" class="form-select">
-                            <option value="Prescription">Prescription</option>
-                            <option value="X-Ray">X-Ray / Bone Scan</option>
-                            <option value="Ultrasound">Ultrasound / Echo</option>
-                            <option value="MRI">MRI / CT Scan</option>
-                            <option value="Lab Report">Blood / Lab Report</option>
-                        </select>
                     </div>
                     <button type="submit" class="btn btn-primary w-100">Save Consultation & Process AI OCR</button>
                 </form>
