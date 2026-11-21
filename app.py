@@ -40,19 +40,20 @@ def get_active_gemini_key():
 
 
 def get_clinic_info(user_id):
-    """Fetches clinic and doctor display details for a given user_id."""
+    """Fetches clinic, doctor display details, and 4-digit PIN for a given user_id."""
     if not user_id:
-        return {"clinic_name": "ClinicDesk", "doctor_name": "Doctor"}
+        return {"clinic_name": "ClinicDesk", "doctor_name": "Doctor", "doctor_pin": "1234"}
     try:
         res = supabase.table('clinics').select('*').eq('user_id', user_id).execute()
         if res.data:
             return {
                 "clinic_name": res.data[0].get("clinic_name") or "ClinicDesk",
-                "doctor_name": res.data[0].get("doctor_name") or "Doctor"
+                "doctor_name": res.data[0].get("doctor_name") or "Doctor",
+                "doctor_pin": str(res.data[0].get("doctor_pin") or "1234")
             }
     except Exception:
         pass
-    return {"clinic_name": "ClinicDesk", "doctor_name": "Doctor"}
+    return {"clinic_name": "ClinicDesk", "doctor_name": "Doctor", "doctor_pin": "1234"}
 
 
 def generate_share_token(patient_id, phone):
@@ -207,12 +208,21 @@ def login_required(f):
 
 def render_page(body_content, **kwargs):
     clinic_brand = session.get('clinic_name', 'ClinicDesk')
+    role_mode = session.get('role_mode', 'doctor')
     nav_links = ""
+
     if 'user' in session and 'user_id' in session:
-        nav_links = """
+        revenue_nav = '<a href="/revenue" class="btn btn-outline-light btn-sm me-2">💰 Revenue Reports</a>' if role_mode == 'doctor' else ''
+        mode_badge = (
+            '<span class="badge bg-warning text-dark me-2">🖥️ Reception Mode</span>'
+            if role_mode == 'reception'
+            else '<span class="badge bg-light text-primary me-2">🩺 Doctor Mode</span>'
+        )
+        nav_links = f"""
+            {mode_badge}
             <a href="/" class="btn btn-outline-light btn-sm me-2">Dashboard</a>
             <a href="/appointments" class="btn btn-outline-light btn-sm me-2">📅 Appointments</a>
-            <a href="/revenue" class="btn btn-outline-light btn-sm me-2">💰 Revenue Reports</a>
+            {revenue_nav}
             <a href="/search" class="btn btn-outline-light btn-sm me-2">Search Patients</a>
             <a href="/register" class="btn btn-outline-light btn-sm me-2">Register Patient</a>
             <a href="/logout" class="btn btn-danger btn-sm">Logout</a>
@@ -236,7 +246,7 @@ def render_page(body_content, **kwargs):
         <nav class="navbar navbar-dark bg-primary shadow-sm mb-4">
             <div class="container">
                 <a class="navbar-brand fw-bold" href="/">🏥 {clinic_brand}</a>
-                <div>
+                <div class="d-flex align-items-center flex-wrap gap-1">
                     {nav_links}
                 </div>
             </div>
@@ -250,6 +260,39 @@ def render_page(body_content, **kwargs):
     return render_template_string(html, **kwargs)
 
 
+@app.route('/switch-mode', methods=['POST'])
+@login_required
+def switch_mode():
+    uid = session['user_id']
+    target_mode = request.form.get('target_mode', 'reception')
+
+    if target_mode == 'reception':
+        session['role_mode'] = 'reception'
+        return redirect(url_for('index'))
+
+    if target_mode == 'doctor':
+        entered_pin = (request.form.get('doctor_pin') or '').strip()
+        info = get_clinic_info(uid)
+        if entered_pin == info['doctor_pin']:
+            session['role_mode'] = 'doctor'
+            return redirect(url_for('index'))
+        return redirect(url_for('index', pin_error='1'))
+
+    if target_mode == 'update_pin':
+        if session.get('role_mode', 'doctor') != 'doctor':
+            return redirect(url_for('index', pin_error='1'))
+        new_pin = (request.form.get('new_pin') or '').strip()
+        if len(new_pin) == 4 and new_pin.isdigit():
+            try:
+                supabase.table('clinics').update({"doctor_pin": new_pin}).eq('user_id', uid).execute()
+                return redirect(url_for('index', pin_saved='1'))
+            except Exception:
+                pass
+        return redirect(url_for('index', pin_error='2'))
+
+    return redirect(url_for('index'))
+
+
 @app.route('/signup', methods=['GET', 'POST'])
 def signup():
     error = None
@@ -257,6 +300,9 @@ def signup():
         clinic_name = request.form.get('clinic_name', '').strip()
         doctor_name = request.form.get('doctor_name', '').strip()
         phone = request.form.get('phone', '').strip()
+        doctor_pin = (request.form.get('doctor_pin') or '1234').strip()
+        if not (len(doctor_pin) == 4 and doctor_pin.isdigit()):
+            doctor_pin = '1234'
         email = request.form.get('email', '').strip()
         password = request.form.get('password', '')
 
@@ -271,7 +317,8 @@ def signup():
                     "user_id": user_id,
                     "clinic_name": clinic_name,
                     "doctor_name": doctor_name,
-                    "phone": phone
+                    "phone": phone,
+                    "doctor_pin": doctor_pin
                 }).execute()
 
                 if response.session:
@@ -279,6 +326,7 @@ def signup():
                     session['user_id'] = user_id
                     session['clinic_name'] = clinic_name
                     session['doctor_name'] = doctor_name
+                    session['role_mode'] = 'doctor'
                     return redirect(url_for('index'))
                 else:
                     return redirect(url_for('login', registered='1'))
@@ -313,9 +361,16 @@ def signup():
                         <label class="form-label">Login Email</label>
                         <input type="email" name="email" class="form-control" required>
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label">Create Password (Min 6 characters)</label>
-                        <input type="password" name="password" class="form-control" minlength="6" required>
+                    <div class="row">
+                        <div class="col-md-7 mb-3">
+                            <label class="form-label">Create Password (Min 6 characters)</label>
+                            <input type="password" name="password" class="form-control" minlength="6" required>
+                        </div>
+                        <div class="col-md-5 mb-3">
+                            <label class="form-label">4-Digit Doctor PIN</label>
+                            <input type="text" name="doctor_pin" class="form-control" maxlength="4" pattern="[0-9]{{4}}" value="1234" required>
+                            <div class="form-text">Used to unlock Revenue from Reception Mode.</div>
+                        </div>
                     </div>
                     <button type="submit" class="btn btn-primary w-100">Create Clinic Workspace</button>
                 </form>
@@ -349,6 +404,7 @@ def login():
                 session['user_id'] = user_id
                 session['clinic_name'] = info['clinic_name']
                 session['doctor_name'] = info['doctor_name']
+                session['role_mode'] = 'doctor'
                 return redirect(url_for('index'))
         except Exception:
             error = "Invalid email or password. Please verify your credentials."
@@ -397,6 +453,9 @@ def index():
     uid = session['user_id']
     clinic_name = session.get('clinic_name', 'ClinicDesk')
     doctor_name = session.get('doctor_name', 'Doctor')
+    role_mode = session.get('role_mode', 'doctor')
+    pin_error = request.args.get('pin_error')
+    pin_saved = request.args.get('pin_saved')
 
     try:
         p_res = supabase.table('patients').select('id', count='exact').eq('user_id', uid).execute()
@@ -442,13 +501,86 @@ def index():
     else:
         recent_rows = '<tr><td colspan="5" class="text-center text-muted py-3">No recent patients registered yet.</td></tr>'
 
+    # Role-based Workspace Switcher Banner
+    if role_mode == 'doctor':
+        mode_switcher_card = """
+        <div class="card shadow-sm border-primary mb-4">
+            <div class="card-body py-3 d-flex justify-content-between align-items-center flex-wrap gap-3">
+                <div>
+                    <span class="badge bg-primary me-2">🩺 Solo Clinic / Doctor Mode Active</span>
+                    <span class="text-muted small">Full access enabled (including Revenue Reports & PIN settings). Handing the screen to front-desk staff?</span>
+                </div>
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <form method="POST" action="/switch-mode" class="d-flex align-items-center gap-1">
+                        <input type="hidden" name="target_mode" value="update_pin">
+                        <input type="text" name="new_pin" maxlength="4" pattern="[0-9]{4}" class="form-control form-control-sm" style="width: 95px;" placeholder="New PIN">
+                        <button type="submit" class="btn btn-sm btn-outline-secondary">Set PIN</button>
+                    </form>
+                    <form method="POST" action="/switch-mode" class="m-0">
+                        <input type="hidden" name="target_mode" value="reception">
+                        <button type="submit" class="btn btn-sm btn-warning fw-semibold">🖥️ Switch to Reception Mode</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+        """
+        revenue_stat_card = f"""
+        <div class="col-md-3">
+            <div class="card shadow-sm border-0 bg-dark text-white p-3">
+                <div class="card-body">
+                    <h6 class="text-uppercase fw-semibold mb-2">Collected Revenue</h6>
+                    <h2 class="display-5 fw-bold mb-0">₹{total_revenue:,.0f}</h2>
+                </div>
+            </div>
+        </div>
+        """
+        revenue_quick_btn = '<a href="/revenue" class="btn btn-outline-dark">💰 View Financial Reports</a>'
+    else:
+        mode_switcher_card = """
+        <div class="card shadow-sm border-warning bg-warning-subtle mb-4">
+            <div class="card-body py-3 d-flex justify-content-between align-items-center flex-wrap gap-3">
+                <div>
+                    <span class="badge bg-warning text-dark me-2">🖥️ Reception / Front-Desk Mode Active</span>
+                    <span class="text-dark small">Queue, Patient Registration & AI Scan Uploads are active. Financial totals are hidden.</span>
+                </div>
+                <form method="POST" action="/switch-mode" class="d-flex align-items-center gap-2 m-0">
+                    <input type="hidden" name="target_mode" value="doctor">
+                    <input type="password" name="doctor_pin" maxlength="4" class="form-control form-control-sm" style="width: 120px;" placeholder="Doctor PIN" required>
+                    <button type="submit" class="btn btn-sm btn-primary fw-semibold">🔓 Unlock Doctor Mode</button>
+                </form>
+            </div>
+        </div>
+        """
+        revenue_stat_card = """
+        <div class="col-md-3">
+            <div class="card shadow-sm border-0 bg-secondary text-white p-3">
+                <div class="card-body">
+                    <h6 class="text-uppercase fw-semibold mb-2">Revenue Ledger</h6>
+                    <h2 class="display-5 fw-bold mb-0">🔒 Hidden</h2>
+                </div>
+            </div>
+        </div>
+        """
+        revenue_quick_btn = ""
+
+    alert_banner = ""
+    if pin_error == '1':
+        alert_banner = '<div class="alert alert-danger py-2">❌ Incorrect Doctor PIN. Default PIN is <strong>1234</strong> unless changed by the doctor.</div>'
+    elif pin_error == '2':
+        alert_banner = '<div class="alert alert-danger py-2">❌ Please enter a valid 4-digit numeric PIN.</div>'
+    elif pin_saved == '1':
+        alert_banner = '<div class="alert alert-success py-2">✅ Doctor PIN updated successfully!</div>'
+
     body = f"""
-    <div class="row mb-4">
+    <div class="row mb-3">
         <div class="col-md-12">
-            <h2 class="fw-bold text-primary">🏥 {clinic_name} — Doctor Dashboard</h2>
-            <p class="text-muted">Welcome back, <strong>{doctor_name}</strong>! Here is your clinic's live operational overview for today ({today_str}).</p>
+            <h2 class="fw-bold text-primary">🏥 {clinic_name} — Workspace Dashboard</h2>
+            <p class="text-muted mb-2">Welcome back, <strong>{doctor_name}</strong>! Live operational overview for today ({today_str}).</p>
+            {alert_banner}
         </div>
     </div>
+
+    {mode_switcher_card}
 
     <div class="row g-4 mb-4">
         <div class="col-md-3">
@@ -475,14 +607,7 @@ def index():
                 </div>
             </div>
         </div>
-        <div class="col-md-3">
-            <div class="card shadow-sm border-0 bg-dark text-white p-3">
-                <div class="card-body">
-                    <h6 class="text-uppercase fw-semibold mb-2">Collected Revenue</h6>
-                    <h2 class="display-5 fw-bold mb-0">₹{total_revenue:,.0f}</h2>
-                </div>
-            </div>
-        </div>
+        {revenue_stat_card}
     </div>
 
     <div class="row g-4">
@@ -491,7 +616,7 @@ def index():
                 <h5 class="text-primary mb-3">⚡ Quick Actions</h5>
                 <div class="d-grid gap-2">
                     <a href="/appointments" class="btn btn-outline-primary">📅 View Today's Queue</a>
-                    <a href="/revenue" class="btn btn-outline-dark">💰 View Financial Reports</a>
+                    {revenue_quick_btn}
                     <a href="/register" class="btn btn-primary">➕ Register New Patient</a>
                 </div>
             </div>
@@ -527,6 +652,9 @@ def index():
 @app.route('/revenue')
 @login_required
 def revenue_reports():
+    if session.get('role_mode', 'doctor') != 'doctor':
+        return redirect(url_for('index', pin_error='1'))
+
     uid = session['user_id']
     try:
         res = supabase.table('visits').select('*, patients(id, name, phone)').eq('user_id', uid).order('created_at', desc=True).execute()
