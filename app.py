@@ -1075,7 +1075,10 @@ def patient_profile(patient_id):
     patient = p_res.data[0]
 
     v_res = supabase.table('visits').select('*, prescriptions(*)').eq('patient_id', patient_id).order('created_at', desc=True).execute()
-    visits = v_res.data
+    visits = v_res.data or []
+
+    today_str = str(date.today())
+    todays_visit = next((v for v in visits if str(v.get('visit_date', v.get('created_at', '')))[:10] == today_str), None)
 
     token = generate_share_token(patient['id'], patient['phone'])
     share_url = url_for('public_patient_share', patient_id=patient['id'], token=token, _external=True)
@@ -1122,6 +1125,11 @@ def patient_profile(patient_id):
         visit_cards = '<div class="alert alert-info text-center">No consultation history recorded yet.</div>'
 
     abha_display = patient.get('abha_id') or ''
+    attach_today_btn = (
+        f'<a href="/visit/{todays_visit["id"]}/add-report" class="btn btn-primary w-100 mb-2">📎 Add Report to Today\'s Visit (No Extra Fee)</a>'
+        if todays_visit else ''
+    )
+    new_visit_btn_class = "btn btn-outline-success w-100 mb-2" if todays_visit else "btn btn-success w-100 mb-2"
 
     body = f"""
     <div class="row">
@@ -1140,7 +1148,8 @@ def patient_profile(patient_id):
                     </div>
                 </form>
 
-                <a href="/visit/new/{patient['id']}" class="btn btn-success w-100 mb-2">🩺 Log New Visit, Scans & Fee</a>
+                {attach_today_btn}
+                <a href="/visit/new/{patient['id']}" class="{new_visit_btn_class}">🩺 Log New Visit, Scans & Fee</a>
                 <a href="{wa_link}" target="_blank" class="btn btn-outline-success w-100 mb-2">📲 Share Records on WhatsApp</a>
                 <button type="button" onclick="copyShareLink()" class="btn btn-outline-primary w-100 mb-2">🔗 Copy Second-Opinion Link</button>
                 <a href="/patient/{patient['id']}/print" target="_blank" class="btn btn-outline-secondary w-100">🖨️ Print / Save PDF Summary</a>
@@ -1454,6 +1463,14 @@ def log_visit(patient_id):
             return "Patient not found or unauthorized access.", 404
         patient = p_res.data[0]
         patient_name = patient['name']
+
+        # Check if this patient already has a visit logged today
+        v_check = supabase.table('visits').select('id, created_at, visit_date').eq('patient_id', patient_id).order('created_at', desc=True).limit(5).execute()
+        today_str = str(date.today())
+        todays_visit = next(
+            (v for v in (v_check.data or []) if str(v.get('visit_date', v.get('created_at', '')))[:10] == today_str),
+            None
+        )
     except Exception as e:
         return f"<div style='padding:20px;font-family:sans-serif;'><h3>Database Error</h3><p>{str(e)}</p><a href='/'>Back to Dashboard</a></div>", 500
 
@@ -1520,11 +1537,22 @@ def log_visit(patient_id):
         except Exception as e:
             error = f"Error saving consultation: {str(e)}"
 
+    same_day_warning = ""
+    if todays_visit:
+        same_day_warning = f"""
+        <div class="alert alert-warning border-warning shadow-sm">
+            <strong>⚠️ Same-Day Visit Detected:</strong> {patient_name} already has a visit logged today.<br>
+            If the patient is simply handing over an extra report or scan from today's consultation,
+            <a href="/visit/{todays_visit['id']}/add-report" class="alert-link fw-bold">click here to attach it to today's visit without charging a duplicate fee</a>.
+        </div>
+        """
+
     body = f"""
     <div class="row justify-content-center">
         <div class="col-md-7">
             <div class="card shadow-sm p-4">
                 <h3 class="mb-3 text-primary">Log Visit, Scans & AI OCR for {patient_name}</h3>
+                {same_day_warning}
                 {f'<div class="alert alert-danger">{error}</div>' if error else ''}
                 <form method="POST" enctype="multipart/form-data">
                     <div class="mb-3">
