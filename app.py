@@ -17,6 +17,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 app.secret_key = "clinicdesk_secure_random_secret_key"
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 # ClinicDesk Supabase Credentials
 SUPABASE_URL = "https://pfmldhpidblncypuagld.supabase.co"
@@ -685,10 +686,21 @@ def index():
 @app.route('/ayupulse-import', methods=['GET', 'POST'])
 @login_required
 def ayupulse_import():
-    """Receives pre-visit triage payload from AyuPulse and imports it into ClinicDesk."""
+    """Receives full pre-visit triage payload from AyuPulse (via POST or GET) and imports it into ClinicDesk."""
     uid = session['user_id']
 
-    if request.method == 'POST':
+    def decode_field(val, is_b64):
+        if not val:
+            return ""
+        if is_b64:
+            try:
+                return base64.b64decode(val.encode("utf-8")).decode("utf-8").strip()
+            except Exception:
+                return val.strip()
+        return val.strip()
+
+    # Step 2: Doctor confirms and saves the reviewed report into the patient's chart
+    if request.method == 'POST' and request.form.get('handoff_stage') != 'preview':
         name = (request.form.get('name') or 'AyuPulse Visitor').strip()
         phone = (request.form.get('phone') or '').strip()
         age = request.form.get('age', '').strip()
@@ -736,29 +748,34 @@ def ayupulse_import():
         except Exception as e:
             return f"<div class='container mt-4'><div class='alert alert-danger'>Import error: {str(e)}</div><a href='/'>Back to Dashboard</a></div>", 500
 
-    p_name = request.args.get('name', '').strip()
-    p_phone = request.args.get('phone', '').strip()
-    p_age = request.args.get('age', '').strip()
-    p_gender = request.args.get('gender', 'Male').strip()
-    p_metrics = request.args.get('metrics', '').strip()
-    p_summary = request.args.get('summary', '').strip()
+    # Step 1: Incoming POST (full report) or GET from AyuPulse -> show pre-filled preview form
+    src = request.form if request.method == 'POST' else request.args
+    is_b64 = src.get('b64_payload') == '1'
+
+    p_name = decode_field(src.get('name', ''), is_b64)
+    p_phone = decode_field(src.get('phone', ''), is_b64)
+    p_age = decode_field(src.get('age', ''), is_b64)
+    p_gender = decode_field(src.get('gender', 'Male'), is_b64) or 'Male'
+    p_metrics = decode_field(src.get('metrics', ''), is_b64)
+    p_summary = decode_field(src.get('summary', ''), is_b64)
 
     combined_notes = ""
-    if p_metrics:
-        combined_notes += f"Body Metrics: {p_metrics}\n"
+    if p_metrics and p_metrics not in p_summary:
+        combined_notes += f"Body Metrics: {p_metrics}\n\n"
     if p_summary:
-        combined_notes += f"\n{p_summary}"
+        combined_notes += p_summary
 
     body = f"""
     <div class="row justify-content-center">
-        <div class="col-md-7">
+        <div class="col-md-8">
             <div class="card shadow-sm border-success p-4">
                 <div class="d-flex align-items-center justify-content-between mb-3">
-                    <h3 class="text-success mb-0">❤️ Import AyuPulse Pre-Visit Triage</h3>
-                    <span class="badge bg-success-subtle text-success border border-success">1-Click Intake</span>
+                    <h3 class="text-success mb-0">❤️ Import Complete AyuPulse Report</h3>
+                    <span class="badge bg-success-subtle text-success border border-success">Full 6-Section Sync</span>
                 </div>
-                <p class="text-muted small">Review the patient's pre-visit wellness & lab summary below, enter their mobile number if missing, and import directly into their chart.</p>
-                <form method="POST">
+                <p class="text-muted small">Review the patient's complete pre-visit wellness & lab summary below, confirm their mobile number, and save directly into their chart.</p>
+                <form method="POST" action="/ayupulse-import">
+                    <input type="hidden" name="handoff_stage" value="save">
                     <div class="row">
                         <div class="col-md-6 mb-3">
                             <label class="form-label fw-semibold">Patient Full Name</label>
@@ -788,8 +805,8 @@ def ayupulse_import():
                         <input type="text" name="diagnosis" value="AyuPulse Pre-Visit Triage" class="form-control">
                     </div>
                     <div class="mb-3">
-                        <label class="form-label fw-semibold">Imported AyuPulse Metrics & AI Summary</label>
-                        <textarea name="triage_notes" class="form-control" rows="6">{combined_notes.strip()}</textarea>
+                        <label class="form-label fw-semibold">Complete AyuPulse Metrics & AI Summary (All 6 Sections)</label>
+                        <textarea name="triage_notes" class="form-control" rows="14">{combined_notes.strip()}</textarea>
                     </div>
                     <div class="form-check mb-3">
                         <input class="form-check-input" type="checkbox" name="add_to_queue" id="add_to_queue" value="1" checked>
@@ -799,7 +816,7 @@ def ayupulse_import():
                     </div>
                     <div class="d-flex gap-2">
                         <a href="/" class="btn btn-outline-secondary w-50">Cancel</a>
-                        <button type="submit" class="btn btn-success w-50 fw-semibold">✅ Save Patient & Open Chart</button>
+                        <button type="submit" class="btn btn-success w-50 fw-semibold">✅ Save Full Report & Open Chart</button>
                     </div>
                 </form>
             </div>
