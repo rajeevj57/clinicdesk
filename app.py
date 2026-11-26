@@ -491,11 +491,77 @@ def index():
     except Exception:
         recent_patients = []
 
-    # Pre-visit AyuPulse Triage Share Link for this Clinic
-    clinic_return_url = url_for('ayupulse_import', _external=True)
+    # Fetch Incoming AyuPulse Pre-Visit Reports submitted by patients for this clinic
+    incoming_handoffs = []
+    try:
+        h_res = (
+            supabase.table('ayupulse_handoffs')
+            .select('id, payload, created_at')
+            .eq('clinic_uid', uid)
+            .order('created_at', desc=True)
+            .limit(10)
+            .execute()
+        )
+        incoming_handoffs = h_res.data if h_res.data else []
+    except Exception:
+        incoming_handoffs = []
+
+    incoming_inbox_card = ""
+    if incoming_handoffs:
+        inbox_rows = ""
+        for item in incoming_handoffs:
+            p_data = item.get('payload') or {}
+            pt_name = p_data.get('name', 'Patient')
+            pt_phone = p_data.get('phone', 'N/A')
+            pt_age = p_data.get('age', '')
+            pt_gender = p_data.get('gender', '')
+            submitted_time = str(item.get('created_at', ''))[:16].replace('T', ' ')
+            inbox_rows += f"""
+            <tr>
+                <td class="fw-bold">{pt_name}</td>
+                <td>{pt_phone}</td>
+                <td>{pt_age} / {pt_gender}</td>
+                <td class="small text-muted">{submitted_time}</td>
+                <td class="text-end">
+                    <a href="/ayupulse-import?handoff_id={item['id']}" class="btn btn-sm btn-success fw-semibold">✅ Review & Add to Chart</a>
+                    <form method="POST" action="/ayupulse-dismiss" class="d-inline ms-1">
+                        <input type="hidden" name="handoff_id" value="{item['id']}">
+                        <button type="submit" class="btn btn-sm btn-outline-secondary" title="Dismiss">✕</button>
+                    </form>
+                </td>
+            </tr>
+            """
+        incoming_inbox_card = f"""
+        <div class="card shadow-sm border-success mb-4">
+            <div class="card-header bg-success text-white py-2 d-flex justify-content-between align-items-center">
+                <h6 class="mb-0 fw-bold">📥 Incoming AyuPulse Pre-Visit Reports ({len(incoming_handoffs)} Ready)</h6>
+                <span class="badge bg-light text-success">Submitted by Patients (No Login Needed)</span>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0 align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Patient Name</th>
+                                <th>Phone</th>
+                                <th>Age / Gender</th>
+                                <th>Received</th>
+                                <th class="text-end">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {inbox_rows}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        """
+
+    # Pre-visit AyuPulse Triage Share Link for this Clinic (includes clinic_uid so patients submit without login)
     ayupulse_triage_link = (
         f"{AYUPULSE_BASE_URL}/?clinic={urllib.parse.quote(clinic_name)}"
-        f"&return_to={urllib.parse.quote(clinic_return_url, safe='')}"
+        f"&clinic_uid={urllib.parse.quote(uid)}"
     )
     wa_triage_msg = (
         f"Hello! Before your upcoming visit to *{clinic_name}*, please complete your 1-minute "
@@ -599,6 +665,7 @@ def index():
         </div>
     </div>
 
+    {incoming_inbox_card}
     {mode_switcher_card}
 
     <div class="row g-4 mb-4">
@@ -640,7 +707,7 @@ def index():
                 </div>
                 <hr class="my-3">
                 <h6 class="text-success fw-bold mb-1">❤️ AyuPulse Pre-Visit Triage</h6>
-                <p class="small text-muted mb-2">Send this link to incoming patients so their 10-sec check & lab notes import automatically.</p>
+                <p class="small text-muted mb-2">Send this link to incoming patients—their report arrives in your Inbox above without needing any login.</p>
                 <div class="d-grid gap-2">
                     <a href="{wa_triage_share}" target="_blank" class="btn btn-sm btn-success">📲 Send Pre-Visit Link on WhatsApp</a>
                     <button type="button" onclick="copyTriageLink()" class="btn btn-sm btn-outline-success">🔗 Copy AyuPulse Intake Link</button>
@@ -683,6 +750,20 @@ def index():
     return render_page(body)
 
 
+@app.route('/ayupulse-dismiss', methods=['POST'])
+@login_required
+def ayupulse_dismiss():
+    """Dismisses an incoming AyuPulse handoff from the clinic inbox."""
+    uid = session['user_id']
+    handoff_id = (request.form.get('handoff_id') or '').strip()
+    if handoff_id:
+        try:
+            supabase.table('ayupulse_handoffs').delete().eq('id', handoff_id).eq('clinic_uid', uid).execute()
+        except Exception:
+            pass
+    return redirect(url_for('index'))
+
+
 @app.route('/ayupulse-import', methods=['GET', 'POST'])
 @login_required
 def ayupulse_import():
@@ -699,7 +780,7 @@ def ayupulse_import():
                 return val.strip()
         return val.strip()
 
-    # Step 2: Doctor confirms and saves the reviewed report into the patient's chart
+    # Step 2: Doctor or Receptionist confirms and saves the reviewed report into the patient's chart
     if request.method == 'POST' and request.form.get('handoff_stage') != 'preview':
         name = (request.form.get('name') or 'AyuPulse Visitor').strip()
         phone = (request.form.get('phone') or '').strip()
@@ -755,7 +836,7 @@ def ayupulse_import():
         except Exception as e:
             return f"<div class='container mt-4'><div class='alert alert-danger'>Import error: {str(e)}</div><a href='/'>Back to Dashboard</a></div>", 500
 
-    # Step 1: Load full payload via handoff_id from Supabase (survives login redirect cleanly)
+    # Step 1: Load full payload via handoff_id from Supabase
     handoff_id = (request.args.get('handoff_id') or request.form.get('handoff_id') or '').strip()
     data_src = {}
     if handoff_id:
