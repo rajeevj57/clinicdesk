@@ -70,49 +70,6 @@ def format_whatsapp_phone(phone):
     return digits
 
 
-def compute_indian_vitals_line(height_cm, weight_kg, waist_in, bp_reading):
-    """Builds a compact Indian BMI, Waist-to-Height (WHtR), and BP vitals summary line."""
-    parts = []
-    h_cm = None
-    try:
-        if height_cm:
-            h_val = float(height_cm)
-            if 50 < h_val <= 260:
-                h_cm = h_val
-                parts.append(f"Ht: {h_cm:.0f} cm")
-    except (ValueError, TypeError):
-        pass
-
-    try:
-        if weight_kg:
-            w_val = float(weight_kg)
-            if 10 < w_val <= 350:
-                parts.append(f"Wt: {w_val:.1f} kg")
-                if h_cm:
-                    bmi = round(w_val / ((h_cm / 100.0) ** 2), 1)
-                    tag = "Normal" if 18.5 <= bmi < 23.0 else ("Underweight" if bmi < 18.5 else ("Overweight" if bmi < 25.0 else "Obesity Risk"))
-                    parts.append(f"Indian BMI: {bmi} ({tag})")
-    except (ValueError, TypeError):
-        pass
-
-    try:
-        if waist_in:
-            waist_val = float(waist_in)
-            if 15 < waist_val <= 85:
-                parts.append(f"Waist: {waist_val:.1f} in")
-                if h_cm:
-                    whtr = round((waist_val * 2.54) / h_cm, 2)
-                    w_tag = "Healthy" if whtr < 0.50 else "Thin-Fat Central Caution"
-                    parts.append(f"WHtR: {whtr} ({w_tag})")
-    except (ValueError, TypeError):
-        pass
-
-    if bp_reading and bp_reading.strip():
-        parts.append(f"BP: {bp_reading.strip()}")
-
-    return " | ".join(parts)
-
-
 def compress_image_for_ocr(file_bytes, mime_type):
     """Resizes large phone photos to max 1600px JPEG to prevent Render OOM and speed up OCR."""
     if not mime_type or not mime_type.startswith("image/"):
@@ -130,24 +87,17 @@ def compress_image_for_ocr(file_bytes, mime_type):
 
 
 def extract_medical_file_with_ai(file_bytes, mime_type, document_type="Prescription"):
-    """Scan-aware medical OCR with radiology/ECG verification disclaimer."""
+    """Scan-aware medical OCR with radiology observation disclaimer for imaging scans."""
     api_key = get_active_gemini_key()
     if not api_key:
         return "AI API Key not configured.", "OCR skipped. Please verify GEMINI_API_KEY in server environment."
 
     file_bytes, mime_type = compress_image_for_ocr(file_bytes, mime_type)
 
-    imaging_types = {"X-Ray", "Ultrasound", "MRI", "12-Lead ECG"}
+    imaging_types = {"X-Ray", "Ultrasound", "MRI"}
     is_imaging_scan = document_type in imaging_types
 
-    if document_type == "12-Lead ECG":
-        prompt_text = (
-            "You are assisting a physician reviewing a 12-Lead ECG strip or report. "
-            "Extract printed machine intervals (Heart Rate bpm, PR, QRS, QT/QTc, Axis), rhythm observations, and printed machine interpretation strictly in two sections:\n"
-            "DIAGNOSIS: [ECG rhythm / rate summary]\n"
-            "NOTES: [Detailed ECG parameters, intervals, and printed machine notes clearly]"
-        )
-    elif is_imaging_scan:
+    if is_imaging_scan:
         prompt_text = (
             f"You are assisting a physician reviewing a {document_type} image or report. "
             "Extract visible anatomical observations, printed film labels, measurements, or report text strictly in two sections:\n"
@@ -205,7 +155,7 @@ def extract_medical_file_with_ai(file_bytes, mime_type, document_type="Prescript
                     notes = parts[1].strip()
 
                 if is_imaging_scan:
-                    notes = f"⚠️ [AI Preliminary {document_type} Observation — Verify Clinically]\n{notes}"
+                    notes = f"⚠️ [AI Preliminary Image Observation — Verify with Radiologist Report]\n{notes}"
 
                 return diagnosis, notes
 
@@ -251,7 +201,7 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'user' not in session or 'user_id' not in session:
-            return redirect(url_for('login', next=request.full_path))
+            return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -262,7 +212,7 @@ def render_page(body_content, **kwargs):
     nav_links = ""
 
     if 'user' in session and 'user_id' in session:
-        revenue_nav = '<a href="/revenue" class="btn btn-outline-light btn-sm me-2">💰 Revenue</a>' if role_mode == 'doctor' else ''
+        revenue_nav = '<a href="/revenue" class="btn btn-outline-light btn-sm me-2">💰 Revenue Reports</a>' if role_mode == 'doctor' else ''
         mode_badge = (
             '<span class="badge bg-warning text-dark me-2">🖥️ Reception Mode</span>'
             if role_mode == 'reception'
@@ -271,12 +221,10 @@ def render_page(body_content, **kwargs):
         nav_links = f"""
             {mode_badge}
             <a href="/" class="btn btn-outline-light btn-sm me-2">Dashboard</a>
-            <a href="/appointments" class="btn btn-outline-light btn-sm me-2">📅 Queue</a>
-            <a href="/recalls" class="btn btn-outline-light btn-sm me-2">⏰ Recalls</a>
+            <a href="/appointments" class="btn btn-outline-light btn-sm me-2">📅 Appointments</a>
             {revenue_nav}
-            <a href="/ayupulse-import" class="btn btn-warning btn-sm text-dark fw-semibold me-2">💓 AyuPulse Intake</a>
-            <a href="/search" class="btn btn-outline-light btn-sm me-2">Patients</a>
-            <a href="/register" class="btn btn-outline-light btn-sm me-2">➕ Register</a>
+            <a href="/search" class="btn btn-outline-light btn-sm me-2">Search Patients</a>
+            <a href="/register" class="btn btn-outline-light btn-sm me-2">Register Patient</a>
             <a href="/logout" class="btn btn-danger btn-sm">Logout</a>
         """
     else:
@@ -440,8 +388,6 @@ def signup():
 def login():
     error = None
     registered = request.args.get('registered')
-    next_url = request.args.get('next') or request.form.get('next') or ''
-
     if request.method == 'POST':
         email = request.form.get('email')
         password = request.form.get('password')
@@ -459,8 +405,6 @@ def login():
                 session['clinic_name'] = info['clinic_name']
                 session['doctor_name'] = info['doctor_name']
                 session['role_mode'] = 'doctor'
-                if next_url and next_url.startswith('/'):
-                    return redirect(next_url)
                 return redirect(url_for('index'))
         except Exception:
             error = "Invalid email or password. Please verify your credentials."
@@ -473,7 +417,6 @@ def login():
                 {'<div class="alert alert-success">Clinic account created! Please log in below.</div>' if registered else ''}
                 {f'<div class="alert alert-danger">{error}</div>' if error else ''}
                 <form method="POST">
-                    <input type="hidden" name="next" value="{next_url}">
                     <div class="mb-3">
                         <label class="form-label">Doctor / Staff Email</label>
                         <input type="email" name="email" class="form-control" required>
@@ -558,6 +501,7 @@ def index():
     else:
         recent_rows = '<tr><td colspan="5" class="text-center text-muted py-3">No recent patients registered yet.</td></tr>'
 
+    # Role-based Workspace Switcher Banner
     if role_mode == 'doctor':
         mode_switcher_card = """
         <div class="card shadow-sm border-primary mb-4">
@@ -627,8 +571,6 @@ def index():
     elif pin_saved == '1':
         alert_banner = '<div class="alert alert-success py-2">✅ Doctor PIN updated successfully!</div>'
 
-    ayupulse_share_link = f"https://ayupulse-h34b.onrender.com/?clinic={urllib.parse.quote(clinic_name)}"
-
     body = f"""
     <div class="row mb-3">
         <div class="col-md-12">
@@ -674,15 +616,8 @@ def index():
                 <h5 class="text-primary mb-3">⚡ Quick Actions</h5>
                 <div class="d-grid gap-2">
                     <a href="/appointments" class="btn btn-outline-primary">📅 View Today's Queue</a>
-                    <a href="/recalls" class="btn btn-outline-success">⏰ Follow-Up & Lab Recalls</a>
-                    <a href="/ayupulse-import" class="btn btn-warning fw-semibold text-dark">💓 Import AyuPulse Pre-Visit</a>
                     {revenue_quick_btn}
                     <a href="/register" class="btn btn-primary">➕ Register New Patient</a>
-                </div>
-                <hr>
-                <div class="small text-muted">
-                    <strong>Patient Pre-Visit Link:</strong><br>
-                    <a href="{ayupulse_share_link}" target="_blank" class="text-break">{ayupulse_share_link}</a>
                 </div>
             </div>
         </div>
@@ -707,188 +642,6 @@ def index():
                         </tbody>
                     </table>
                 </div>
-            </div>
-        </div>
-    </div>
-    """
-    return render_page(body)
-
-
-@app.route('/ayupulse-import', methods=['GET', 'POST'])
-@login_required
-def ayupulse_import():
-    """Imports a patient's AyuPulse pre-visit summary directly into ClinicDesk."""
-    uid = session['user_id']
-    error = None
-
-    prefill_name = (request.args.get('name') or request.form.get('name') or '').strip()
-    prefill_phone = (request.args.get('phone') or request.form.get('phone') or '').strip()
-    prefill_age = (request.args.get('age') or request.form.get('age') or '').strip()
-    prefill_gender = request.args.get('gender') or request.form.get('gender') or 'Male'
-    prefill_summary = (request.args.get('summary') or request.form.get('summary') or '').strip()
-
-    if request.method == 'POST':
-        if not prefill_name:
-            error = "Patient name is required to import."
-        else:
-            try:
-                patient_id = None
-                if prefill_phone:
-                    existing = supabase.table('patients').select('id').eq('user_id', uid).eq('phone', prefill_phone).execute()
-                    if existing.data:
-                        patient_id = existing.data[0]['id']
-
-                if not patient_id:
-                    p_res = supabase.table('patients').insert({
-                        "user_id": uid,
-                        "name": prefill_name,
-                        "phone": prefill_phone or f"AYU-{int(time.time())}",
-                        "age": int(prefill_age) if prefill_age.isdigit() else None,
-                        "gender": prefill_gender,
-                    }).execute()
-                    if p_res.data:
-                        patient_id = p_res.data[0]['id']
-
-                if patient_id:
-                    return redirect(url_for('log_visit', patient_id=patient_id, ayu_notes=prefill_summary[:1800]))
-            except Exception as e:
-                error = f"Import error: {str(e)}"
-
-    body = f"""
-    <div class="row justify-content-center">
-        <div class="col-md-8">
-            <div class="card shadow-sm border-warning p-4">
-                <h3 class="mb-2 text-primary">💓 Import AyuPulse Pre-Visit Summary</h3>
-                <p class="text-muted small mb-3">
-                    Paste the WhatsApp summary shared by a patient from <strong>AyuPulse</strong> (or open via the direct AyuPulse clinic handoff button) to auto-create/match their patient profile and pre-fill today's consultation notes.
-                </p>
-                {f'<div class="alert alert-danger">{error}</div>' if error else ''}
-                <form method="POST">
-                    <div class="row g-3 mb-3">
-                        <div class="col-md-5">
-                            <label class="form-label">Patient Full Name</label>
-                            <input type="text" name="name" value="{prefill_name}" class="form-control" required>
-                        </div>
-                        <div class="col-md-3">
-                            <label class="form-label">Phone Number</label>
-                            <input type="text" name="phone" value="{prefill_phone}" class="form-control" placeholder="10-digit mobile">
-                        </div>
-                        <div class="col-md-2">
-                            <label class="form-label">Age</label>
-                            <input type="number" name="age" value="{prefill_age}" class="form-control">
-                        </div>
-                        <div class="col-md-2">
-                            <label class="form-label">Gender</label>
-                            <select name="gender" class="form-select">
-                                <option value="Male" {'selected' if prefill_gender == 'Male' else ''}>Male</option>
-                                <option value="Female" {'selected' if prefill_gender == 'Female' else ''}>Female</option>
-                                <option value="Other" {'selected' if prefill_gender == 'Other' else ''}>Other</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">AyuPulse ABCD, BMI & Lab Summary</label>
-                        <textarea name="summary" class="form-control" rows="7" placeholder="Paste the AyuPulse WhatsApp summary here...">{prefill_summary}</textarea>
-                    </div>
-                    <div class="d-flex gap-2">
-                        <a href="/" class="btn btn-outline-secondary w-50">Cancel</a>
-                        <button type="submit" class="btn btn-primary w-50 fw-bold">Match Patient & Open Consultation →</button>
-                    </div>
-                </form>
-            </div>
-        </div>
-    </div>
-    """
-    return render_page(body)
-
-
-@app.route('/recalls')
-@login_required
-def recall_queue():
-    """Displays 30/90-day patient follow-up and lab recall reminders with 1-tap WhatsApp nudges."""
-    uid = session['user_id']
-    clinic_name = session.get('clinic_name', 'ClinicDesk')
-    doctor_name = session.get('doctor_name', 'Doctor')
-    today_str = str(date.today())
-
-    try:
-        res = supabase.table('visits').select('*, patients(id, name, phone)').eq('user_id', uid).order('created_at', desc=True).limit(100).execute()
-        visits = res.data or []
-    except Exception:
-        visits = []
-
-    recall_rows = ""
-    count = 0
-    for v in visits:
-        notes = v.get('notes') or ''
-        follow_up_date = ''
-        for line in notes.splitlines():
-            if line.startswith("FOLLOW-UP DUE:"):
-                follow_up_date = line.replace("FOLLOW-UP DUE:", "").strip()
-                break
-        if not follow_up_date:
-            continue
-
-        count += 1
-        p_info = v.get('patients') or {}
-        p_name = p_info.get('name', 'Patient')
-        p_phone = p_info.get('phone', '')
-        p_id = p_info.get('id', '#')
-        is_due = follow_up_date <= today_str
-        status_badge = (
-            '<span class="badge bg-danger">Due / Overdue</span>'
-            if is_due
-            else '<span class="badge bg-info text-dark">Upcoming</span>'
-        )
-        wa_phone = format_whatsapp_phone(p_phone)
-        recall_msg = (
-            f"Hello {p_name},\n"
-            f"Gentle follow-up reminder from *{clinic_name}* ({doctor_name}). "
-            f"Your scheduled review / repeat lab checkup was noted for *{follow_up_date}* "
-            f"(Diagnosis: {v.get('diagnosis_tags', 'General Review')}). "
-            f"Reply here if you would like us to reserve a slot for you!"
-        )
-        wa_link = f"https://wa.me/{wa_phone}?text={urllib.parse.quote(recall_msg)}"
-
-        recall_rows += f"""
-        <tr>
-            <td class="fw-bold">{follow_up_date}</td>
-            <td><a href="/patient/{p_id}" class="fw-bold text-decoration-none">{p_name}</a><br><small class="text-muted">{p_phone}</small></td>
-            <td>{v.get('diagnosis_tags', 'Consultation')}</td>
-            <td>{status_badge}</td>
-            <td>
-                <a href="{wa_link}" target="_blank" class="btn btn-sm btn-success fw-semibold">📲 Send WhatsApp Recall</a>
-            </td>
-        </tr>
-        """
-
-    if count == 0:
-        recall_rows = '<tr><td colspan="5" class="text-center py-4 text-muted">No follow-up dates logged yet. Set a Follow-Up Due Date when logging a visit!</td></tr>'
-
-    body = f"""
-    <div class="row mb-3">
-        <div class="col-md-12">
-            <h2 class="fw-bold text-primary">⏰ 30/90-Day Patient Follow-Up & Lab Recall Queue</h2>
-            <p class="text-muted">Automated recall list built from follow-up dates set during consultations.</p>
-        </div>
-    </div>
-    <div class="card shadow-sm">
-        <div class="card-body p-0">
-            <div class="table-responsive">
-                <table class="table table-hover align-middle mb-0">
-                    <thead class="table-light">
-                        <tr>
-                            <th>Follow-Up Date</th>
-                            <th>Patient</th>
-                            <th>Reason / Diagnosis</th>
-                            <th>Status</th>
-                            <th>Action</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {recall_rows}
-                    </tbody>
-                </table>
             </div>
         </div>
     </div>
@@ -1196,10 +949,7 @@ def register_patient():
     <div class="row justify-content-center">
         <div class="col-md-6">
             <div class="card shadow-sm p-4">
-                <div class="d-flex justify-content-between align-items-center mb-3">
-                    <h3 class="mb-0 text-primary">Register New Patient</h3>
-                    <a href="/ayupulse-import" class="btn btn-sm btn-warning fw-semibold">💓 Import AyuPulse</a>
-                </div>
+                <h3 class="mb-3 text-primary">Register New Patient</h3>
                 {f'<div class="alert alert-danger">{error}</div>' if error else ''}
                 <form method="POST">
                     <div class="mb-3">
@@ -1220,4 +970,642 @@ def register_patient():
                             <label class="form-label">Age</label>
                             <input type="number" name="age" class="form-control">
                         </div>
-                        <div class="col-
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Gender</label>
+                            <select name="gender" class="form-select">
+                                <option value="Male">Male</option>
+                                <option value="Female">Female</option>
+                                <option value="Other">Other</option>
+                            </select>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100">Save & Continue</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    """
+    return render_page(body)
+
+
+@app.route('/search', methods=['GET'])
+@login_required
+def search_patients():
+    uid = session['user_id']
+    query = request.args.get('q', '')
+    patients = []
+    if query:
+        res = (
+            supabase.table('patients')
+            .select('*')
+            .eq('user_id', uid)
+            .or_(f"name.ilike.%{query}%,phone.ilike.%{query}%,abha_id.ilike.%{query}%")
+            .execute()
+        )
+        patients = res.data
+    else:
+        res = supabase.table('patients').select('*').eq('user_id', uid).order('created_at', desc=True).limit(15).execute()
+        patients = res.data
+
+    rows = ""
+    if patients:
+        for p in patients:
+            abha_val = p.get('abha_id') or '—'
+            rows += f"""
+            <tr>
+                <td class="fw-semibold">{p['name']}</td>
+                <td>{p['phone']}</td>
+                <td><span class="badge bg-light text-dark border">{abha_val}</span></td>
+                <td>{p.get('age', '')}</td>
+                <td>{p.get('gender', '')}</td>
+                <td><a href="/patient/{p['id']}" class="btn btn-sm btn-outline-primary">View Profile</a></td>
+            </tr>
+            """
+    else:
+        rows = '<tr><td colspan="6" class="text-center py-4 text-muted">No patients found.</td></tr>'
+
+    body = f"""
+    <div class="row justify-content-center">
+        <div class="col-md-10">
+            <h3 class="mb-4">Patient Directory & Search</h3>
+            <form method="GET" class="input-group mb-4">
+                <input type="text" name="q" value="{query}" class="form-control" placeholder="Search by name, phone number, or ABHA ID...">
+                <button class="btn btn-primary" type="submit">Search</button>
+            </form>
+            <div class="card shadow-sm">
+                <div class="card-body p-0">
+                    <table class="table table-hover mb-0 align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Name</th>
+                                <th>Phone</th>
+                                <th>ABHA ID</th>
+                                <th>Age</th>
+                                <th>Gender</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rows}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    """
+    return render_page(body)
+
+
+@app.route('/patient/<int:patient_id>', methods=['GET', 'POST'])
+@login_required
+def patient_profile(patient_id):
+    uid = session['user_id']
+    if request.method == 'POST' and request.form.get('action') == 'update_abha':
+        new_abha = request.form.get('abha_id', '').strip()
+        try:
+            supabase.table('patients').update({"abha_id": new_abha or None}).eq('id', patient_id).eq('user_id', uid).execute()
+        except Exception:
+            pass
+        return redirect(url_for('patient_profile', patient_id=patient_id))
+
+    p_res = supabase.table('patients').select('*').eq('id', patient_id).eq('user_id', uid).execute()
+    if not p_res.data:
+        return "Patient not found or unauthorized access.", 404
+    patient = p_res.data[0]
+
+    v_res = supabase.table('visits').select('*, prescriptions(*)').eq('patient_id', patient_id).order('created_at', desc=True).execute()
+    visits = v_res.data or []
+
+    today_str = str(date.today())
+    todays_visit = next((v for v in visits if str(v.get('visit_date', v.get('created_at', '')))[:10] == today_str), None)
+
+    token = generate_share_token(patient['id'], patient['phone'])
+    share_url = url_for('public_patient_share', patient_id=patient['id'], token=token, _external=True)
+    wa_phone = format_whatsapp_phone(patient['phone'])
+    clinic_name = session.get('clinic_name', 'ClinicDesk')
+    wa_message = (
+        f"Hello {patient['name']},\n"
+        f"Here is your digital medical record & scan summary from {clinic_name}. "
+        f"You can view or share this link with any doctor for a second opinion:\n{share_url}"
+    )
+    wa_link = f"https://wa.me/{wa_phone}?text={urllib.parse.quote(wa_message)}"
+
+    visit_cards = ""
+    if visits:
+        for v in visits:
+            visit_date = v.get('visit_date', v.get('created_at', ''))[:10]
+            fee = v.get('consultation_fee', 0)
+            pay_status = v.get('payment_status', 'Paid')
+            pay_badge = "bg-success" if pay_status == "Paid" else "bg-warning text-dark"
+
+            rx_list = v.get('prescriptions') or []
+            rx_section = render_attachments_gallery(rx_list, max_height="140px", show_large_link=False)
+
+            visit_cards += f"""
+            <div class="card shadow-sm mb-3">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <h6 class="text-primary fw-bold mb-0">Visit Date: {visit_date}</h6>
+                        <div>
+                            <span class="badge bg-dark me-1">Fee: ₹{fee}</span>
+                            <span class="badge {pay_badge} me-2">{pay_status}</span>
+                            <span class="badge bg-info text-dark">{v.get('diagnosis_tags', '')}</span>
+                        </div>
+                    </div>
+                    <p class="mt-2 mb-2" style="white-space: pre-line;"><strong>Notes:</strong> {v.get('notes', 'No notes recorded.')}</p>
+                    {rx_section}
+                    <div class="mt-3 pt-2 border-top d-flex justify-content-end">
+                        <a href="/visit/{v['id']}/add-report" class="btn btn-sm btn-outline-primary">➕ Add Another Report / Scan to This Visit</a>
+                    </div>
+                </div>
+            </div>
+            """
+    else:
+        visit_cards = '<div class="alert alert-info text-center">No consultation history recorded yet.</div>'
+
+    abha_display = patient.get('abha_id') or ''
+    attach_today_btn = (
+        f'<a href="/visit/{todays_visit["id"]}/add-report" class="btn btn-primary w-100 mb-2">📎 Add Report to Today\'s Visit (No Extra Fee)</a>'
+        if todays_visit else ''
+    )
+    new_visit_btn_class = "btn btn-outline-success w-100 mb-2" if todays_visit else "btn btn-success w-100 mb-2"
+
+    body = f"""
+    <div class="row">
+        <div class="col-md-4">
+            <div class="card shadow-sm p-4 mb-4">
+                <h4 class="text-primary">{patient['name']}</h4>
+                <p class="mb-1"><strong>Phone:</strong> {patient['phone']}</p>
+                <p class="mb-1"><strong>Age:</strong> {patient.get('age', '')} | <strong>Gender:</strong> {patient.get('gender', '')}</p>
+                
+                <form method="POST" class="mt-2 mb-3 p-2 bg-light rounded border">
+                    <input type="hidden" name="action" value="update_abha">
+                    <label class="form-label small fw-bold mb-1 text-secondary">🇮🇳 ABHA Health ID</label>
+                    <div class="input-group input-group-sm">
+                        <input type="text" name="abha_id" value="{abha_display}" class="form-control" placeholder="14-digit ABHA ID">
+                        <button type="submit" class="btn btn-outline-primary">Save</button>
+                    </div>
+                </form>
+
+                {attach_today_btn}
+                <a href="/visit/new/{patient['id']}" class="{new_visit_btn_class}">🩺 Log New Visit, Scans & Fee</a>
+                <a href="{wa_link}" target="_blank" class="btn btn-outline-success w-100 mb-2">📲 Share Records on WhatsApp</a>
+                <button type="button" onclick="copyShareLink()" class="btn btn-outline-primary w-100 mb-2">🔗 Copy Second-Opinion Link</button>
+                <a href="/patient/{patient['id']}/print" target="_blank" class="btn btn-outline-secondary w-100">🖨️ Print / Save PDF Summary</a>
+                <div id="copyAlert" class="text-success small mt-2 text-center fw-semibold" style="display:none;">✅ Second-opinion link copied!</div>
+            </div>
+        </div>
+        <div class="col-md-8">
+            <h4 class="mb-3">Consultation History & Billing</h4>
+            {visit_cards}
+        </div>
+    </div>
+    <script>
+        function copyShareLink() {{
+            navigator.clipboard.writeText("{share_url}");
+            document.getElementById("copyAlert").style.display = "block";
+            setTimeout(() => {{ document.getElementById("copyAlert").style.display = "none"; }}, 3000);
+        }}
+    </script>
+    """
+    return render_page(body)
+
+
+@app.route('/visit/<int:visit_id>/add-report', methods=['GET', 'POST'])
+@login_required
+def add_report_to_visit(visit_id):
+    """Attaches one or more extra scans/reports to an existing visit without duplicating the visit or fee."""
+    uid = session.get('user_id')
+    if not uid:
+        return redirect(url_for('logout'))
+
+    try:
+        v_res = supabase.table('visits').select('*, patients(id, name)').eq('id', visit_id).eq('user_id', uid).execute()
+        if not v_res.data:
+            return "Visit not found or unauthorized access.", 404
+        visit = v_res.data[0]
+        patient_info = visit.get('patients') or {}
+        patient_id = patient_info.get('id') or visit.get('patient_id')
+        patient_name = patient_info.get('name', 'Patient')
+    except Exception as e:
+        return f"<div style='padding:20px;font-family:sans-serif;'><h3>Database Error</h3><p>{str(e)}</p><a href='/'>Back to Dashboard</a></div>", 500
+
+    error = None
+    if request.method == 'POST':
+        document_type = request.form.get('document_type', 'Lab Report')
+        files = request.files.getlist('prescription_files')
+        use_ai_ocr = request.form.get('use_ai_ocr')
+
+        valid_files = [f for f in files if f and f.filename != '']
+        if not valid_files:
+            error = "Please choose at least one report or scan file to attach."
+        else:
+            try:
+                existing_notes = (visit.get('notes') or '').strip()
+                existing_diag = (visit.get('diagnosis_tags') or '').strip()
+                appended_notes = []
+
+                for idx, file in enumerate(valid_files, 1):
+                    raw_bytes = file.read()
+                    raw_mime = file.content_type or 'image/jpeg'
+                    file_bytes, mime_type = compress_image_for_ocr(raw_bytes, raw_mime)
+
+                    if use_ai_ocr and file_bytes:
+                        ai_diag, ai_notes = extract_medical_file_with_ai(file_bytes, mime_type, document_type)
+                        if not existing_diag or existing_diag == "General Consultation":
+                            existing_diag = ai_diag
+                        appended_notes.append(f"--- Additional {document_type} (#{idx}: {file.filename}) ---\n{ai_notes}")
+
+                    filename = secure_filename(file.filename) or f"report_{idx}.jpg"
+                    file_path = f"visit_{visit_id}_{int(time.time())}_{idx}_{filename}"
+
+                    supabase.storage.from_('prescriptions').upload(
+                        file_path, file_bytes, {"content-type": mime_type}
+                    )
+                    public_url = supabase.storage.from_('prescriptions').get_public_url(file_path)
+
+                    supabase.table('prescriptions').insert({
+                        "visit_id": visit_id,
+                        "prescription_url": public_url,
+                        "document_type": document_type
+                    }).execute()
+
+                if appended_notes:
+                    joined_new = "\n\n".join(appended_notes)
+                    updated_notes = f"{existing_notes}\n\n{joined_new}" if existing_notes else joined_new
+                    supabase.table('visits').update({
+                        "diagnosis_tags": existing_diag,
+                        "notes": updated_notes
+                    }).eq('id', visit_id).eq('user_id', uid).execute()
+
+                return redirect(url_for('patient_profile', patient_id=patient_id))
+            except Exception as e:
+                error = f"Error attaching report: {str(e)}"
+
+    visit_date = visit.get('visit_date', visit.get('created_at', ''))[:10]
+
+    body = f"""
+    <div class="row justify-content-center">
+        <div class="col-md-7">
+            <div class="card shadow-sm p-4">
+                <h3 class="mb-1 text-primary">➕ Add Reports / Scans to Existing Visit</h3>
+                <p class="text-muted small mb-3">Patient: <strong>{patient_name}</strong> | Visit Date: <strong>{visit_date}</strong> (No extra fee will be charged)</p>
+                {f'<div class="alert alert-danger">{error}</div>' if error else ''}
+                <form method="POST" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <label class="form-label">Document Type</label>
+                        <select name="document_type" class="form-select">
+                            <option value="Lab Report">Blood / Lab Report</option>
+                            <option value="Ultrasound">Ultrasound / Echo</option>
+                            <option value="X-Ray">X-Ray / Bone Scan</option>
+                            <option value="MRI">MRI / CT Scan</option>
+                            <option value="Prescription">Prescription</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Select One or Multiple Files (Images / PDFs)</label>
+                        <input type="file" name="prescription_files" class="form-control" accept="image/*,.pdf" multiple required>
+                        <div class="form-text">Hold <strong>Ctrl</strong> (or select multiple photos on phone) to attach all pages/reports at once.</div>
+                        <div class="form-check mt-2">
+                            <input class="form-check-input" type="checkbox" name="use_ai_ocr" id="use_ai_ocr" value="1" checked>
+                            <label class="form-check-label fw-semibold text-success" for="use_ai_ocr">
+                                🤖 Extract & Append Findings with Gemini AI Vision
+                            </label>
+                        </div>
+                    </div>
+                    <div class="d-flex gap-2">
+                        <a href="/patient/{patient_id}" class="btn btn-outline-secondary w-50">Cancel</a>
+                        <button type="submit" class="btn btn-primary w-50">Attach Reports to Visit</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    """
+    return render_page(body)
+
+
+@app.route('/share/<int:patient_id>/<token>')
+def public_patient_share(patient_id, token):
+    """Public read-only patient medical record & scan portal for second opinions (no login required)."""
+    p_res = supabase.table('patients').select('*').eq('id', patient_id).execute()
+    if not p_res.data:
+        return "Record not found", 404
+    patient = p_res.data[0]
+
+    expected_token = generate_share_token(patient['id'], patient['phone'])
+    if not hmac.compare_digest(token, expected_token):
+        return "Invalid or expired share link.", 403
+
+    clinic_info = get_clinic_info(patient.get('user_id'))
+    v_res = supabase.table('visits').select('*, prescriptions(*)').eq('patient_id', patient_id).order('created_at', desc=True).execute()
+    visits = v_res.data
+
+    visit_cards = ""
+    if visits:
+        for v in visits:
+            visit_date = v.get('visit_date', v.get('created_at', ''))[:10]
+            rx_list = v.get('prescriptions') or []
+            rx_section = render_attachments_gallery(rx_list, max_height="200px", show_large_link=True)
+
+            visit_cards += f"""
+            <div class="card shadow-sm mb-3">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <h6 class="text-primary fw-bold mb-0">Consultation Date: {visit_date}</h6>
+                        <span class="badge bg-info text-dark">{v.get('diagnosis_tags', 'Consultation')}</span>
+                    </div>
+                    <p class="mt-2 mb-2" style="white-space: pre-line;"><strong>Clinical Summary & Notes:</strong> {v.get('notes', 'No notes recorded.')}</p>
+                    {rx_section}
+                </div>
+            </div>
+            """
+    else:
+        visit_cards = '<div class="alert alert-info">No consultation records available yet.</div>'
+
+    abha_line = f"<p class='mb-0'><strong>ABHA Health ID:</strong> {patient['abha_id']}</p>" if patient.get('abha_id') else ""
+
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Patient Medical Records - {patient['name']}</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    </head>
+    <body class="bg-light">
+        <nav class="navbar navbar-dark bg-primary shadow-sm mb-4">
+            <div class="container">
+                <span class="navbar-brand fw-bold">🏥 {clinic_info['clinic_name']} — Digital Health Record</span>
+                <button onclick="window.print()" class="btn btn-outline-light btn-sm">🖨️ Print / Save PDF</button>
+            </div>
+        </nav>
+        <div class="container mb-5" style="max-width: 850px;">
+            <div class="card shadow-sm p-4 mb-4 border-primary">
+                <div class="d-flex justify-content-between align-items-start">
+                    <div>
+                        <h3 class="text-primary mb-1">{patient['name']}</h3>
+                        <p class="mb-1"><strong>Age:</strong> {patient.get('age', 'N/A')} | <strong>Gender:</strong> {patient.get('gender', 'N/A')}</p>
+                        {abha_line}
+                    </div>
+                    <div class="text-end">
+                        <span class="badge bg-success mb-1">Verified Digital Record</span>
+                        <div class="small text-muted">Consulting: {clinic_info['doctor_name']}</div>
+                    </div>
+                </div>
+            </div>
+            <h5 class="mb-3 text-secondary">Medical History, Prescriptions & Diagnostic Scans</h5>
+            {visit_cards}
+        </div>
+    </body>
+    </html>
+    """
+    return html
+
+
+@app.route('/patient/<int:patient_id>/print')
+@login_required
+def print_patient_summary(patient_id):
+    uid = session['user_id']
+    clinic_name = session.get('clinic_name', 'ClinicDesk')
+    doctor_name = session.get('doctor_name', 'Doctor')
+
+    p_res = supabase.table('patients').select('*').eq('id', patient_id).eq('user_id', uid).execute()
+    if not p_res.data:
+        return "Patient not found", 404
+    patient = p_res.data[0]
+
+    v_res = supabase.table('visits').select('*, prescriptions(*)').eq('patient_id', patient_id).order('created_at', desc=True).execute()
+    visits = v_res.data
+
+    visit_rows = ""
+    if visits:
+        for v in visits:
+            visit_date = v.get('visit_date', v.get('created_at', ''))[:10]
+            fee = v.get('consultation_fee', 0)
+            pay_status = v.get('payment_status', 'Paid')
+            rx_html = ""
+            for idx, rx in enumerate(v.get('prescriptions') or [], 1):
+                rx_url = rx['prescription_url']
+                doc_type = rx.get('document_type', 'Prescription')
+                if not rx_url.lower().endswith('.pdf'):
+                    rx_html += f'<div style="display:inline-block; margin: 10px 10px 0 0; vertical-align:top;"><p class="mb-1"><strong>[{doc_type} #{idx}]</strong></p><img src="{rx_url}" style="max-width: 240px; border: 1px solid #ccc; padding: 4px;" alt="Scan"></div>'
+                else:
+                    rx_html += f'<div style="margin-top: 8px;"><p class="mb-1"><strong>[{doc_type} #{idx}]</strong> - <a href="{rx_url}" target="_blank">View PDF Document</a></p></div>'
+
+            visit_rows += f"""
+            <div style="border-bottom: 1px solid #ddd; padding-bottom: 15px; margin-bottom: 15px;">
+                <p><strong>Date:</strong> {visit_date} | <strong>Diagnosis:</strong> {v.get('diagnosis_tags', 'N/A')} | <strong>Fee:</strong> ₹{fee} ({pay_status})</p>
+                <p style="white-space: pre-line;"><strong>Notes:</strong> {v.get('notes', 'No notes.')}</p>
+                <div>{rx_html}</div>
+            </div>
+            """
+    else:
+        visit_rows = "<p>No visit history recorded.</p>"
+
+    abha_print = f"<div class='col-md-12 mt-2'><strong>ABHA ID:</strong> {patient['abha_id']}</div>" if patient.get('abha_id') else ""
+
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Patient Medical & Billing Summary - {patient['name']}</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+        <style>
+            @media print {{
+                .no-print {{ display: none !important; }}
+                body {{ background: white !important; font-size: 14px; }}
+            }}
+        </style>
+    </head>
+    <body class="bg-white p-5" onload="window.print()">
+        <div class="container">
+            <div class="d-flex justify-content-between align-items-center border-bottom pb-3 mb-4">
+                <div>
+                    <h2>🏥 {clinic_name} — Patient Summary</h2>
+                    <p class="text-muted mb-0">Attending Physician: {doctor_name} | Powered by ClinicDesk</p>
+                </div>
+                <button onclick="window.print()" class="btn btn-primary no-print">🖨️ Print / Save PDF</button>
+            </div>
+
+            <div class="card p-3 mb-4 bg-light border-0">
+                <h4 class="text-primary">{patient['name']}</h4>
+                <div class="row">
+                    <div class="col-md-4"><strong>Phone:</strong> {patient['phone']}</div>
+                    <div class="col-md-4"><strong>Age:</strong> {patient.get('age', 'N/A')}</div>
+                    <div class="col-md-4"><strong>Gender:</strong> {patient.get('gender', 'N/A')}</div>
+                    {abha_print}
+                </div>
+            </div>
+
+            <h4 class="mb-3">Visit, Prescription, Scan & Billing History</h4>
+            {visit_rows}
+        </div>
+    </body>
+    </html>
+    """
+    return html
+
+
+@app.route('/visit/new/<int:patient_id>', methods=['GET', 'POST'])
+@login_required
+def log_visit(patient_id):
+    uid = session.get('user_id')
+    if not uid:
+        return redirect(url_for('logout'))
+
+    try:
+        p_res = supabase.table('patients').select('*').eq('id', patient_id).eq('user_id', uid).execute()
+        if not p_res.data:
+            return "Patient not found or unauthorized access.", 404
+        patient = p_res.data[0]
+        patient_name = patient['name']
+
+        # Check if this patient already has a visit logged today
+        v_check = supabase.table('visits').select('id, created_at, visit_date').eq('patient_id', patient_id).order('created_at', desc=True).limit(5).execute()
+        today_str = str(date.today())
+        todays_visit = next(
+            (v for v in (v_check.data or []) if str(v.get('visit_date', v.get('created_at', '')))[:10] == today_str),
+            None
+        )
+    except Exception as e:
+        return f"<div style='padding:20px;font-family:sans-serif;'><h3>Database Error</h3><p>{str(e)}</p><a href='/'>Back to Dashboard</a></div>", 500
+
+    error = None
+    if request.method == 'POST':
+        diagnosis = (request.form.get('diagnosis') or '').strip()
+        notes = (request.form.get('notes') or '').strip()
+        document_type = request.form.get('document_type', 'Prescription')
+        fee = request.form.get('consultation_fee', 0)
+        payment_status = request.form.get('payment_status', 'Paid')
+        files = request.files.getlist('prescription_files')
+        use_ai_ocr = request.form.get('use_ai_ocr')
+
+        valid_files = [f for f in files if f and f.filename != '']
+
+        try:
+            processed_files = []
+            ai_summaries = []
+
+            for idx, file in enumerate(valid_files, 1):
+                raw_bytes = file.read()
+                raw_mime = file.content_type or 'image/jpeg'
+                file_bytes, mime_type = compress_image_for_ocr(raw_bytes, raw_mime)
+                processed_files.append((idx, file.filename, file_bytes, mime_type))
+
+                if use_ai_ocr and file_bytes:
+                    ai_diag, ai_notes = extract_medical_file_with_ai(file_bytes, mime_type, document_type)
+                    if not diagnosis:
+                        diagnosis = ai_diag
+                    label = f"Report #{idx} ({file.filename})" if len(valid_files) > 1 else "AI OCR Extracted Report"
+                    ai_summaries.append(f"--- {label} ---\n{ai_notes}")
+
+            if ai_summaries:
+                combined_ai = "\n\n".join(ai_summaries)
+                notes = f"{notes}\n\n{combined_ai}" if notes else combined_ai
+
+            v_res = supabase.table('visits').insert({
+                "user_id": uid,
+                "patient_id": patient_id,
+                "diagnosis_tags": diagnosis or "General Consultation",
+                "notes": notes,
+                "consultation_fee": float(fee) if fee else 0,
+                "payment_status": payment_status
+            }).execute()
+
+            if v_res.data and processed_files:
+                visit_id = v_res.data[0]['id']
+                for idx, orig_name, file_bytes, mime_type in processed_files:
+                    filename = secure_filename(orig_name) or f"scan_{idx}.jpg"
+                    file_path = f"visit_{visit_id}_{int(time.time())}_{idx}_{filename}"
+
+                    supabase.storage.from_('prescriptions').upload(
+                        file_path, file_bytes, {"content-type": mime_type}
+                    )
+                    public_url = supabase.storage.from_('prescriptions').get_public_url(file_path)
+
+                    supabase.table('prescriptions').insert({
+                        "visit_id": visit_id,
+                        "prescription_url": public_url,
+                        "document_type": document_type
+                    }).execute()
+
+            return redirect(url_for('patient_profile', patient_id=patient_id))
+        except Exception as e:
+            error = f"Error saving consultation: {str(e)}"
+
+    same_day_warning = ""
+    if todays_visit:
+        same_day_warning = f"""
+        <div class="alert alert-warning border-warning shadow-sm">
+            <strong>⚠️ Same-Day Visit Detected:</strong> {patient_name} already has a visit logged today.<br>
+            If the patient is simply handing over an extra report or scan from today's consultation,
+            <a href="/visit/{todays_visit['id']}/add-report" class="alert-link fw-bold">click here to attach it to today's visit without charging a duplicate fee</a>.
+        </div>
+        """
+
+    body = f"""
+    <div class="row justify-content-center">
+        <div class="col-md-7">
+            <div class="card shadow-sm p-4">
+                <h3 class="mb-3 text-primary">Log Visit, Scans & AI OCR for {patient_name}</h3>
+                {same_day_warning}
+                {f'<div class="alert alert-danger">{error}</div>' if error else ''}
+                <form method="POST" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <label class="form-label">Primary Document Type</label>
+                        <select name="document_type" class="form-select">
+                            <option value="Prescription">Prescription</option>
+                            <option value="Lab Report">Blood / Lab Report</option>
+                            <option value="Ultrasound">Ultrasound / Echo</option>
+                            <option value="X-Ray">X-Ray / Bone Scan</option>
+                            <option value="MRI">MRI / CT Scan</option>
+                        </select>
+                        <div class="form-text">Selecting X-Ray, Ultrasound, or MRI automatically adds a preliminary radiologist verification reminder.</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Upload One or Multiple Scan Images / PDF Reports</label>
+                        <input type="file" name="prescription_files" id="prescription_files" class="form-control" accept="image/*,.pdf" multiple>
+                        <div class="form-text">Select all reports for this visit together (hold <strong>Ctrl</strong> on PC or tap multiple photos on phone). You can also add more reports later from the visit card.</div>
+                        <div class="form-check mt-2">
+                            <input class="form-check-input" type="checkbox" name="use_ai_ocr" id="use_ai_ocr" value="1" checked>
+                            <label class="form-check-label fw-semibold text-success" for="use_ai_ocr">
+                                🤖 Automatically Extract Diagnosis & Notes from All Uploaded Reports
+                            </label>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Diagnosis / Symptoms (Optional if AI OCR is checked)</label>
+                        <input type="text" name="diagnosis" class="form-control" placeholder="e.g. Fever, Gall bladder stone or let AI fill this">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Clinical Notes / Prescription Details</label>
+                        <textarea name="notes" class="form-control" rows="3" placeholder="Add custom notes or leave for AI extraction..."></textarea>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Consultation Fee (₹)</label>
+                            <input type="number" name="consultation_fee" class="form-control" placeholder="500" value="500">
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Payment Status</label>
+                            <select name="payment_status" class="form-select">
+                                <option value="Paid">Paid</option>
+                                <option value="Pending">Pending</option>
+                            </select>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100">Save Consultation & Process All Reports</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    """
+    return render_page(body)
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
