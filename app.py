@@ -24,6 +24,7 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 KEY_FILE = ".gemini_key.txt"
+AYUPULSE_BASE_URL = "https://ayupulse-h34b.onrender.com"
 
 
 def get_active_gemini_key():
@@ -201,7 +202,7 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'user' not in session or 'user_id' not in session:
-            return redirect(url_for('login'))
+            return redirect(url_for('login', next=request.full_path))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -388,6 +389,7 @@ def signup():
 def login():
     error = None
     registered = request.args.get('registered')
+    next_url = request.args.get('next') or request.form.get('next') or ''
     if request.method == 'POST':
         email = request.form.get('email')
         password = request.form.get('password')
@@ -405,6 +407,8 @@ def login():
                 session['clinic_name'] = info['clinic_name']
                 session['doctor_name'] = info['doctor_name']
                 session['role_mode'] = 'doctor'
+                if next_url and next_url.startswith('/'):
+                    return redirect(next_url)
                 return redirect(url_for('index'))
         except Exception:
             error = "Invalid email or password. Please verify your credentials."
@@ -417,6 +421,7 @@ def login():
                 {'<div class="alert alert-success">Clinic account created! Please log in below.</div>' if registered else ''}
                 {f'<div class="alert alert-danger">{error}</div>' if error else ''}
                 <form method="POST">
+                    <input type="hidden" name="next" value="{next_url}">
                     <div class="mb-3">
                         <label class="form-label">Doctor / Staff Email</label>
                         <input type="email" name="email" class="form-control" required>
@@ -484,6 +489,19 @@ def index():
         recent_patients = recent_res.data if recent_res.data else []
     except Exception:
         recent_patients = []
+
+    # Pre-visit AyuPulse Triage Share Link for this Clinic
+    clinic_return_url = url_for('ayupulse_import', _external=True)
+    ayupulse_triage_link = (
+        f"{AYUPULSE_BASE_URL}/?clinic={urllib.parse.quote(clinic_name)}"
+        f"&return_to={urllib.parse.quote(clinic_return_url, safe='')}"
+    )
+    wa_triage_msg = (
+        f"Hello! Before your upcoming visit to *{clinic_name}*, please complete your 1-minute "
+        f"AyuPulse Pre-Visit Health & Lab Check here so Dr. {doctor_name} has your summary ready:\n"
+        f"{ayupulse_triage_link}"
+    )
+    wa_triage_share = f"https://wa.me/?text={urllib.parse.quote(wa_triage_msg)}"
 
     recent_rows = ""
     if recent_patients:
@@ -619,6 +637,14 @@ def index():
                     {revenue_quick_btn}
                     <a href="/register" class="btn btn-primary">➕ Register New Patient</a>
                 </div>
+                <hr class="my-3">
+                <h6 class="text-success fw-bold mb-1">❤️ AyuPulse Pre-Visit Triage</h6>
+                <p class="small text-muted mb-2">Send this link to incoming patients so their 10-sec check & lab notes import automatically.</p>
+                <div class="d-grid gap-2">
+                    <a href="{wa_triage_share}" target="_blank" class="btn btn-sm btn-success">📲 Send Pre-Visit Link on WhatsApp</a>
+                    <button type="button" onclick="copyTriageLink()" class="btn btn-sm btn-outline-success">🔗 Copy AyuPulse Intake Link</button>
+                </div>
+                <div id="triageCopyMsg" class="text-success small mt-2 fw-semibold text-center" style="display:none;">✅ Pre-visit triage link copied!</div>
             </div>
         </div>
         <div class="col-md-8">
@@ -642,6 +668,140 @@ def index():
                         </tbody>
                     </table>
                 </div>
+            </div>
+        </div>
+    </div>
+    <script>
+        function copyTriageLink() {{
+            navigator.clipboard.writeText("{ayupulse_triage_link}");
+            document.getElementById("triageCopyMsg").style.display = "block";
+            setTimeout(() => {{ document.getElementById("triageCopyMsg").style.display = "none"; }}, 3000);
+        }}
+    </script>
+    """
+    return render_page(body)
+
+
+@app.route('/ayupulse-import', methods=['GET', 'POST'])
+@login_required
+def ayupulse_import():
+    """Receives pre-visit triage payload from AyuPulse and imports it into ClinicDesk."""
+    uid = session['user_id']
+
+    if request.method == 'POST':
+        name = (request.form.get('name') or 'AyuPulse Visitor').strip()
+        phone = (request.form.get('phone') or '').strip()
+        age = request.form.get('age', '').strip()
+        gender = request.form.get('gender', 'Other').strip()
+        diagnosis = (request.form.get('diagnosis') or 'AyuPulse Pre-Visit Triage').strip()
+        triage_notes = (request.form.get('triage_notes') or '').strip()
+        add_to_queue = request.form.get('add_to_queue') == '1'
+
+        try:
+            patient_id = None
+            if phone:
+                existing = supabase.table('patients').select('id').eq('user_id', uid).eq('phone', phone).limit(1).execute()
+                if existing.data:
+                    patient_id = existing.data[0]['id']
+
+            if not patient_id:
+                p_ins = supabase.table('patients').insert({
+                    "user_id": uid,
+                    "name": name,
+                    "phone": phone or f"AP-{int(time.time())}",
+                    "age": int(age) if age.isdigit() else None,
+                    "gender": gender if gender in ("Male", "Female", "Other") else "Other"
+                }).execute()
+                patient_id = p_ins.data[0]['id']
+
+            supabase.table('visits').insert({
+                "user_id": uid,
+                "patient_id": patient_id,
+                "diagnosis_tags": diagnosis[:100],
+                "notes": f"--- Imported from AyuPulse Pre-Visit Triage ---\n{triage_notes}",
+                "consultation_fee": 0,
+                "payment_status": "Pending"
+            }).execute()
+
+            if add_to_queue:
+                supabase.table('appointments').insert({
+                    "user_id": uid,
+                    "patient_id": patient_id,
+                    "appointment_date": str(date.today()),
+                    "time_slot": "AyuPulse Triage",
+                    "status": "Waiting"
+                }).execute()
+
+            return redirect(url_for('patient_profile', patient_id=patient_id))
+        except Exception as e:
+            return f"<div class='container mt-4'><div class='alert alert-danger'>Import error: {str(e)}</div><a href='/'>Back to Dashboard</a></div>", 500
+
+    p_name = request.args.get('name', '').strip()
+    p_phone = request.args.get('phone', '').strip()
+    p_age = request.args.get('age', '').strip()
+    p_gender = request.args.get('gender', 'Male').strip()
+    p_metrics = request.args.get('metrics', '').strip()
+    p_summary = request.args.get('summary', '').strip()
+
+    combined_notes = ""
+    if p_metrics:
+        combined_notes += f"Body Metrics: {p_metrics}\n"
+    if p_summary:
+        combined_notes += f"\n{p_summary}"
+
+    body = f"""
+    <div class="row justify-content-center">
+        <div class="col-md-7">
+            <div class="card shadow-sm border-success p-4">
+                <div class="d-flex align-items-center justify-content-between mb-3">
+                    <h3 class="text-success mb-0">❤️ Import AyuPulse Pre-Visit Triage</h3>
+                    <span class="badge bg-success-subtle text-success border border-success">1-Click Intake</span>
+                </div>
+                <p class="text-muted small">Review the patient's pre-visit wellness & lab summary below, enter their mobile number if missing, and import directly into their chart.</p>
+                <form method="POST">
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label fw-semibold">Patient Full Name</label>
+                            <input type="text" name="name" value="{p_name}" class="form-control" required>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label fw-semibold">Mobile Number (Matches Existing Patient)</label>
+                            <input type="text" name="phone" value="{p_phone}" class="form-control" placeholder="e.g. 981020XXXX" required>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Age</label>
+                            <input type="number" name="age" value="{p_age}" class="form-control">
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Gender</label>
+                            <select name="gender" class="form-select">
+                                <option value="Male" {'selected' if p_gender == 'Male' else ''}>Male</option>
+                                <option value="Female" {'selected' if p_gender == 'Female' else ''}>Female</option>
+                                <option value="Other" {'selected' if p_gender not in ('Male', 'Female') else ''}>Other</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Triage Tag / Chief Concern</label>
+                        <input type="text" name="diagnosis" value="AyuPulse Pre-Visit Triage" class="form-control">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Imported AyuPulse Metrics & AI Summary</label>
+                        <textarea name="triage_notes" class="form-control" rows="6">{combined_notes.strip()}</textarea>
+                    </div>
+                    <div class="form-check mb-3">
+                        <input class="form-check-input" type="checkbox" name="add_to_queue" id="add_to_queue" value="1" checked>
+                        <label class="form-check-label fw-semibold" for="add_to_queue">
+                            📅 Also add patient to Today's Waiting Queue
+                        </label>
+                    </div>
+                    <div class="d-flex gap-2">
+                        <a href="/" class="btn btn-outline-secondary w-50">Cancel</a>
+                        <button type="submit" class="btn btn-success w-50 fw-semibold">✅ Save Patient & Open Chart</button>
+                    </div>
+                </form>
             </div>
         </div>
     </div>
@@ -1086,8 +1246,8 @@ def patient_profile(patient_id):
     clinic_name = session.get('clinic_name', 'ClinicDesk')
     wa_message = (
         f"Hello {patient['name']},\n"
-        f"Here is your digital medical record & scan summary from {clinic_name}. "
-        f"You can view or share this link with any doctor for a second opinion:\n{share_url}"
+        f"Here is your digital prescription, scan summary & medical record from {clinic_name}. "
+        f"You can view, print, or share this link with any doctor for a second opinion:\n{share_url}"
     )
     wa_link = f"https://wa.me/{wa_phone}?text={urllib.parse.quote(wa_message)}"
 
@@ -1113,7 +1273,7 @@ def patient_profile(patient_id):
                             <span class="badge bg-info text-dark">{v.get('diagnosis_tags', '')}</span>
                         </div>
                     </div>
-                    <p class="mt-2 mb-2" style="white-space: pre-line;"><strong>Notes:</strong> {v.get('notes', 'No notes recorded.')}</p>
+                    <p class="mt-2 mb-2" style="white-space: pre-line;"><strong>Notes & Rx:</strong> {v.get('notes', 'No notes recorded.')}</p>
                     {rx_section}
                     <div class="mt-3 pt-2 border-top d-flex justify-content-end">
                         <a href="/visit/{v['id']}/add-report" class="btn btn-sm btn-outline-primary">➕ Add Another Report / Scan to This Visit</a>
@@ -1149,15 +1309,15 @@ def patient_profile(patient_id):
                 </form>
 
                 {attach_today_btn}
-                <a href="/visit/new/{patient['id']}" class="{new_visit_btn_class}">🩺 Log New Visit, Scans & Fee</a>
-                <a href="{wa_link}" target="_blank" class="btn btn-outline-success w-100 mb-2">📲 Share Records on WhatsApp</a>
+                <a href="/visit/new/{patient['id']}" class="{new_visit_btn_class}">🩺 Log Visit, Digital Rx & Fee</a>
+                <a href="{wa_link}" target="_blank" class="btn btn-outline-success w-100 mb-2">📲 Send Rx & Records on WhatsApp</a>
                 <button type="button" onclick="copyShareLink()" class="btn btn-outline-primary w-100 mb-2">🔗 Copy Second-Opinion Link</button>
-                <a href="/patient/{patient['id']}/print" target="_blank" class="btn btn-outline-secondary w-100">🖨️ Print / Save PDF Summary</a>
+                <a href="/patient/{patient['id']}/print" target="_blank" class="btn btn-outline-secondary w-100">🖨️ Print / Save PDF Rx Summary</a>
                 <div id="copyAlert" class="text-success small mt-2 text-center fw-semibold" style="display:none;">✅ Second-opinion link copied!</div>
             </div>
         </div>
         <div class="col-md-8">
-            <h4 class="mb-3">Consultation History & Billing</h4>
+            <h4 class="mb-3">Consultation History, Prescriptions & Billing</h4>
             {visit_cards}
         </div>
     </div>
@@ -1316,7 +1476,7 @@ def public_patient_share(patient_id, token):
                         <h6 class="text-primary fw-bold mb-0">Consultation Date: {visit_date}</h6>
                         <span class="badge bg-info text-dark">{v.get('diagnosis_tags', 'Consultation')}</span>
                     </div>
-                    <p class="mt-2 mb-2" style="white-space: pre-line;"><strong>Clinical Summary & Notes:</strong> {v.get('notes', 'No notes recorded.')}</p>
+                    <p class="mt-2 mb-2" style="white-space: pre-line;"><strong>Clinical Summary & Prescription:</strong> {v.get('notes', 'No notes recorded.')}</p>
                     {rx_section}
                 </div>
             </div>
@@ -1398,7 +1558,7 @@ def print_patient_summary(patient_id):
             visit_rows += f"""
             <div style="border-bottom: 1px solid #ddd; padding-bottom: 15px; margin-bottom: 15px;">
                 <p><strong>Date:</strong> {visit_date} | <strong>Diagnosis:</strong> {v.get('diagnosis_tags', 'N/A')} | <strong>Fee:</strong> ₹{fee} ({pay_status})</p>
-                <p style="white-space: pre-line;"><strong>Notes:</strong> {v.get('notes', 'No notes.')}</p>
+                <p style="white-space: pre-line;"><strong>Clinical Notes & Digital Prescription:</strong>\n{v.get('notes', 'No notes.')}</p>
                 <div>{rx_html}</div>
             </div>
             """
@@ -1412,7 +1572,7 @@ def print_patient_summary(patient_id):
     <html lang="en">
     <head>
         <meta charset="UTF-8">
-        <title>Patient Medical & Billing Summary - {patient['name']}</title>
+        <title>Patient Medical & Rx Summary - {patient['name']}</title>
         <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
         <style>
             @media print {{
@@ -1425,7 +1585,7 @@ def print_patient_summary(patient_id):
         <div class="container">
             <div class="d-flex justify-content-between align-items-center border-bottom pb-3 mb-4">
                 <div>
-                    <h2>🏥 {clinic_name} — Patient Summary</h2>
+                    <h2>🏥 {clinic_name} — Digital Prescription & Summary</h2>
                     <p class="text-muted mb-0">Attending Physician: {doctor_name} | Powered by ClinicDesk</p>
                 </div>
                 <button onclick="window.print()" class="btn btn-primary no-print">🖨️ Print / Save PDF</button>
@@ -1481,8 +1641,33 @@ def log_visit(patient_id):
         document_type = request.form.get('document_type', 'Prescription')
         fee = request.form.get('consultation_fee', 0)
         payment_status = request.form.get('payment_status', 'Paid')
+        followup_days = (request.form.get('followup_days') or '').strip()
         files = request.files.getlist('prescription_files')
         use_ai_ocr = request.form.get('use_ai_ocr')
+
+        # Collect structured Digital Rx Pad lines
+        med_names = request.form.getlist('med_name[]')
+        med_doses = request.form.getlist('med_dose[]')
+        med_timings = request.form.getlist('med_timing[]')
+        med_durations = request.form.getlist('med_duration[]')
+
+        rx_lines = []
+        for idx_m, m_name in enumerate(med_names):
+            m_clean = (m_name or '').strip()
+            if m_clean:
+                dose = med_doses[idx_m] if idx_m < len(med_doses) else '1-0-1'
+                timing = med_timings[idx_m] if idx_m < len(med_timings) else 'After Food'
+                dur = (med_durations[idx_m] if idx_m < len(med_durations) else '5 Days').strip() or '5 Days'
+                rx_lines.append(f"{len(rx_lines) + 1}. {m_clean}  —  [{dose}] ({timing}) for {dur}")
+
+        rx_block = ""
+        if rx_lines:
+            rx_block = "💊 DIGITAL PRESCRIPTION (Rx):\n" + "\n".join(rx_lines)
+        if followup_days:
+            rx_block += f"\n\n📅 Follow-Up Advice: Review after {followup_days}."
+
+        if rx_block:
+            notes = f"{rx_block}\n\n{notes}".strip() if notes else rx_block
 
         valid_files = [f for f in files if f and f.filename != '']
 
@@ -1549,12 +1734,72 @@ def log_visit(patient_id):
 
     body = f"""
     <div class="row justify-content-center">
-        <div class="col-md-7">
+        <div class="col-md-9">
             <div class="card shadow-sm p-4">
-                <h3 class="mb-3 text-primary">Log Visit, Scans & AI OCR for {patient_name}</h3>
+                <h3 class="mb-3 text-primary">🩺 Log Visit, Digital Rx & Scans for {patient_name}</h3>
                 {same_day_warning}
                 {f'<div class="alert alert-danger">{error}</div>' if error else ''}
                 <form method="POST" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Diagnosis / Symptoms (Optional if AI OCR is checked)</label>
+                        <input type="text" name="diagnosis" class="form-control" placeholder="e.g. Fever, Gall bladder stone, or let AI fill this">
+                    </div>
+
+                    <div class="card bg-light border-primary-subtle mb-3 p-3">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <span class="fw-bold text-primary">💊 1-Click Digital Prescription Pad (Rx)</span>
+                            <button type="button" class="btn btn-sm btn-outline-primary" onclick="addMedRow()">+ Add Medicine</button>
+                        </div>
+                        <div id="rxContainer">
+                            <div class="row g-2 mb-2 rx-row">
+                                <div class="col-md-5">
+                                    <input type="text" name="med_name[]" class="form-control form-control-sm" placeholder="Medicine Name & Strength (e.g. Tab. Pan-D 40mg)">
+                                </div>
+                                <div class="col-md-2">
+                                    <select name="med_dose[]" class="form-select form-select-sm">
+                                        <option value="1-0-1">1-0-1 (M-N)</option>
+                                        <option value="1-0-0">1-0-0 (Morning)</option>
+                                        <option value="0-0-1">0-0-1 (Night)</option>
+                                        <option value="1-1-1">1-1-1 (TDS)</option>
+                                        <option value="SOS">SOS (As needed)</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-3">
+                                    <select name="med_timing[]" class="form-select form-select-sm">
+                                        <option value="After Food">After Food</option>
+                                        <option value="Before Breakfast">Before Breakfast</option>
+                                        <option value="Before Food">Before Food</option>
+                                        <option value="At Bedtime">At Bedtime</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-2">
+                                    <input type="text" name="med_duration[]" class="form-control form-control-sm" placeholder="5 Days" value="5 Days">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row g-2 mt-1 align-items-center">
+                            <div class="col-auto">
+                                <label class="small fw-semibold text-secondary mb-0">📅 Follow-Up Review:</label>
+                            </div>
+                            <div class="col-md-4">
+                                <select name="followup_days" class="form-select form-select-sm">
+                                    <option value="">No specific follow-up</option>
+                                    <option value="3 Days">After 3 Days</option>
+                                    <option value="5 Days">After 5 Days</option>
+                                    <option value="7 Days">After 7 Days</option>
+                                    <option value="15 Days">After 15 Days</option>
+                                    <option value="1 Month (with Repeat Labs)">After 1 Month (with Repeat Labs)</option>
+                                    <option value="3 Months (HbA1c / Routine)">After 3 Months (HbA1c / Routine)</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">Clinical Notes / Additional Advice</label>
+                        <textarea name="notes" class="form-control" rows="2" placeholder="Add custom notes or leave for AI extraction..."></textarea>
+                    </div>
+
                     <div class="mb-3">
                         <label class="form-label">Primary Document Type</label>
                         <select name="document_type" class="form-select">
@@ -1577,14 +1822,6 @@ def log_visit(patient_id):
                             </label>
                         </div>
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label">Diagnosis / Symptoms (Optional if AI OCR is checked)</label>
-                        <input type="text" name="diagnosis" class="form-control" placeholder="e.g. Fever, Gall bladder stone or let AI fill this">
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label">Clinical Notes / Prescription Details</label>
-                        <textarea name="notes" class="form-control" rows="3" placeholder="Add custom notes or leave for AI extraction..."></textarea>
-                    </div>
                     <div class="row">
                         <div class="col-md-6 mb-3">
                             <label class="form-label">Consultation Fee (₹)</label>
@@ -1603,6 +1840,17 @@ def log_visit(patient_id):
             </div>
         </div>
     </div>
+    <script>
+        function addMedRow() {{
+            const container = document.getElementById('rxContainer');
+            const firstRow = container.querySelector('.rx-row');
+            const clone = firstRow.cloneNode(true);
+            clone.querySelectorAll('input').forEach(inp => {{
+                inp.value = inp.name === 'med_duration[]' ? '5 Days' : '';
+            }});
+            container.appendChild(clone);
+        }}
+    </script>
     """
     return render_page(body)
 
