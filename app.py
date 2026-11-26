@@ -686,7 +686,7 @@ def index():
 @app.route('/ayupulse-import', methods=['GET', 'POST'])
 @login_required
 def ayupulse_import():
-    """Receives full pre-visit triage payload from AyuPulse (via POST or GET) and imports it into ClinicDesk."""
+    """Receives full pre-visit triage payload from AyuPulse via handoff_id (or POST/GET) and imports into ClinicDesk."""
     uid = session['user_id']
 
     def decode_field(val, is_b64):
@@ -708,6 +708,7 @@ def ayupulse_import():
         diagnosis = (request.form.get('diagnosis') or 'AyuPulse Pre-Visit Triage').strip()
         triage_notes = (request.form.get('triage_notes') or '').strip()
         add_to_queue = request.form.get('add_to_queue') == '1'
+        handoff_id = (request.form.get('handoff_id') or '').strip()
 
         try:
             patient_id = None
@@ -744,20 +745,36 @@ def ayupulse_import():
                     "status": "Waiting"
                 }).execute()
 
+            if handoff_id:
+                try:
+                    supabase.table('ayupulse_handoffs').delete().eq('id', handoff_id).execute()
+                except Exception:
+                    pass
+
             return redirect(url_for('patient_profile', patient_id=patient_id))
         except Exception as e:
             return f"<div class='container mt-4'><div class='alert alert-danger'>Import error: {str(e)}</div><a href='/'>Back to Dashboard</a></div>", 500
 
-    # Step 1: Incoming POST (full report) or GET from AyuPulse -> show pre-filled preview form
+    # Step 1: Load full payload via handoff_id from Supabase (survives login redirect cleanly)
+    handoff_id = (request.args.get('handoff_id') or request.form.get('handoff_id') or '').strip()
+    data_src = {}
+    if handoff_id:
+        try:
+            h_res = supabase.table('ayupulse_handoffs').select('payload').eq('id', handoff_id).limit(1).execute()
+            if h_res.data and isinstance(h_res.data[0].get('payload'), dict):
+                data_src = h_res.data[0]['payload']
+        except Exception:
+            pass
+
     src = request.form if request.method == 'POST' else request.args
     is_b64 = src.get('b64_payload') == '1'
 
-    p_name = decode_field(src.get('name', ''), is_b64)
-    p_phone = decode_field(src.get('phone', ''), is_b64)
-    p_age = decode_field(src.get('age', ''), is_b64)
-    p_gender = decode_field(src.get('gender', 'Male'), is_b64) or 'Male'
-    p_metrics = decode_field(src.get('metrics', ''), is_b64)
-    p_summary = decode_field(src.get('summary', ''), is_b64)
+    p_name = (data_src.get('name') or decode_field(src.get('name', ''), is_b64)).strip()
+    p_phone = (data_src.get('phone') or decode_field(src.get('phone', ''), is_b64)).strip()
+    p_age = str(data_src.get('age') or decode_field(src.get('age', ''), is_b64)).strip()
+    p_gender = (data_src.get('gender') or decode_field(src.get('gender', 'Male'), is_b64)).strip() or 'Male'
+    p_metrics = (data_src.get('metrics') or decode_field(src.get('metrics', ''), is_b64)).strip()
+    p_summary = (data_src.get('summary') or decode_field(src.get('summary', ''), is_b64)).strip()
 
     combined_notes = ""
     if p_metrics and p_metrics not in p_summary:
@@ -776,6 +793,7 @@ def ayupulse_import():
                 <p class="text-muted small">Review the patient's complete pre-visit wellness & lab summary below, confirm their mobile number, and save directly into their chart.</p>
                 <form method="POST" action="/ayupulse-import">
                     <input type="hidden" name="handoff_stage" value="save">
+                    <input type="hidden" name="handoff_id" value="{handoff_id}">
                     <div class="row">
                         <div class="col-md-6 mb-3">
                             <label class="form-label fw-semibold">Patient Full Name</label>
