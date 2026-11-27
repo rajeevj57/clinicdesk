@@ -1,4 +1,5 @@
 import os
+import re
 import io
 import time
 import hmac
@@ -100,6 +101,27 @@ def compress_image_for_ocr(file_bytes, mime_type):
         return file_bytes, mime_type
 
 
+def clean_markdown_for_chart(text):
+    """Strips raw ## and ** Markdown syntax into clean, readable clinical formatting."""
+    if not text:
+        return ""
+    cleaned_lines = []
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("## "):
+            title = re.sub(r'[#*]+', '', s).strip().upper()
+            cleaned_lines.append(f"\n=== {title} ===")
+        elif s.startswith("### "):
+            subtitle = re.sub(r'[#*]+', '', s).strip()
+            cleaned_lines.append(f"\n[{subtitle}]")
+        else:
+            line_clean = s.replace("**", "").replace("__", "")
+            if line_clean.startswith("- "):
+                line_clean = "• " + line_clean[2:]
+            cleaned_lines.append(line_clean)
+    return "\n".join(cleaned_lines).strip()
+
+
 def extract_medical_file_with_ai(file_bytes, mime_type, document_type="Prescription"):
     """Scan-aware medical OCR with radiology observation disclaimer for imaging scans."""
     api_key = get_active_gemini_key()
@@ -167,6 +189,8 @@ def extract_medical_file_with_ai(file_bytes, mime_type, document_type="Prescript
                     if diag_part:
                         diagnosis = diag_part[:100]
                     notes = parts[1].strip()
+
+                notes = clean_markdown_for_chart(notes)
 
                 if is_imaging_scan:
                     notes = f"⚠️ [AI Preliminary Image Observation — Verify with Radiologist Report]\n{notes}"
@@ -808,7 +832,7 @@ def ayupulse_import():
         age = request.form.get('age', '').strip()
         gender = request.form.get('gender', 'Other').strip()
         diagnosis = (request.form.get('diagnosis') or 'AyuPulse Pre-Visit Triage').strip()
-        triage_notes = (request.form.get('triage_notes') or '').strip()
+        triage_notes = clean_markdown_for_chart((request.form.get('triage_notes') or '').strip())
         add_to_queue = request.form.get('add_to_queue') == '1'
         handoff_id = (request.form.get('handoff_id') or '').strip()
 
@@ -887,6 +911,8 @@ def ayupulse_import():
     if p_summary:
         combined_notes += p_summary
 
+    cleaned_preview_notes = clean_markdown_for_chart(combined_notes)
+
     body = f"""
     <div class="row justify-content-center">
         <div class="col-md-8">
@@ -929,7 +955,7 @@ def ayupulse_import():
                     </div>
                     <div class="mb-3">
                         <label class="form-label fw-semibold">Complete AyuPulse Metrics & AI Summary (All 6 Sections)</label>
-                        <textarea name="triage_notes" class="form-control" rows="14">{combined_notes.strip()}</textarea>
+                        <textarea name="triage_notes" class="form-control" rows="14">{cleaned_preview_notes}</textarea>
                     </div>
                     <div class="form-check mb-3">
                         <input class="form-check-input" type="checkbox" name="add_to_queue" id="add_to_queue" value="1" checked>
