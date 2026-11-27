@@ -28,6 +28,17 @@ KEY_FILE = ".gemini_key.txt"
 AYUPULSE_BASE_URL = "https://ayupulse-h34b.onrender.com"
 
 
+def get_db():
+    """Attaches the logged-in doctor's Supabase JWT so RLS policies never block inserts/updates."""
+    token = session.get("access_token")
+    if token:
+        try:
+            supabase.postgrest.auth(token)
+        except Exception:
+            pass
+    return supabase
+
+
 def get_active_gemini_key():
     """Reads the Gemini API key from Render environment variables or local fallback."""
     env_key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -46,7 +57,8 @@ def get_clinic_info(user_id):
     if not user_id:
         return {"clinic_name": "ClinicDesk", "doctor_name": "Doctor", "doctor_pin": "1234"}
     try:
-        res = supabase.table('clinics').select('*').eq('user_id', user_id).execute()
+        db = get_db()
+        res = db.table('clinics').select('*').eq('user_id', user_id).execute()
         if res.data:
             return {
                 "clinic_name": res.data[0].get("clinic_name") or "ClinicDesk",
@@ -265,6 +277,7 @@ def render_page(body_content, **kwargs):
 @app.route('/switch-mode', methods=['POST'])
 @login_required
 def switch_mode():
+    db = get_db()
     uid = session['user_id']
     target_mode = request.form.get('target_mode', 'reception')
 
@@ -286,7 +299,7 @@ def switch_mode():
         new_pin = (request.form.get('new_pin') or '').strip()
         if len(new_pin) == 4 and new_pin.isdigit():
             try:
-                supabase.table('clinics').update({"doctor_pin": new_pin}).eq('user_id', uid).execute()
+                db.table('clinics').update({"doctor_pin": new_pin}).eq('user_id', uid).execute()
                 return redirect(url_for('index', pin_saved='1'))
             except Exception:
                 pass
@@ -315,7 +328,10 @@ def signup():
             })
             if response.user:
                 user_id = str(response.user.id)
-                supabase.table('clinics').insert({
+                if response.session:
+                    session['access_token'] = response.session.access_token
+                db = get_db()
+                db.table('clinics').insert({
                     "user_id": user_id,
                     "clinic_name": clinic_name,
                     "doctor_name": doctor_name,
@@ -402,6 +418,8 @@ def login():
             })
             if response.user:
                 user_id = str(response.user.id)
+                if response.session:
+                    session['access_token'] = response.session.access_token
                 info = get_clinic_info(user_id)
                 session['user'] = email
                 session['user_id'] = user_id
@@ -456,6 +474,7 @@ def logout():
 @app.route('/')
 @login_required
 def index():
+    db = get_db()
     uid = session['user_id']
     clinic_name = session.get('clinic_name', 'ClinicDesk')
     doctor_name = session.get('doctor_name', 'Doctor')
@@ -464,13 +483,13 @@ def index():
     pin_saved = request.args.get('pin_saved')
 
     try:
-        p_res = supabase.table('patients').select('id', count='exact').eq('user_id', uid).execute()
+        p_res = db.table('patients').select('id', count='exact').eq('user_id', uid).execute()
         total_patients = p_res.count if p_res.count is not None else len(p_res.data)
     except Exception:
         total_patients = 0
 
     try:
-        v_res = supabase.table('visits').select('id, consultation_fee, payment_status').eq('user_id', uid).execute()
+        v_res = db.table('visits').select('id, consultation_fee, payment_status').eq('user_id', uid).execute()
         visits_data = v_res.data if v_res.data else []
         total_visits = len(visits_data)
         total_revenue = sum([float(v.get('consultation_fee') or 0) for v in visits_data if v.get('payment_status') == 'Paid'])
@@ -480,13 +499,13 @@ def index():
 
     today_str = str(date.today())
     try:
-        a_res = supabase.table('appointments').select('id', count='exact').eq('user_id', uid).eq('appointment_date', today_str).execute()
+        a_res = db.table('appointments').select('id', count='exact').eq('user_id', uid).eq('appointment_date', today_str).execute()
         today_appts = a_res.count if a_res.count is not None else len(a_res.data)
     except Exception:
         today_appts = 0
 
     try:
-        recent_res = supabase.table('patients').select('*').eq('user_id', uid).order('created_at', desc=True).limit(5).execute()
+        recent_res = db.table('patients').select('*').eq('user_id', uid).order('created_at', desc=True).limit(5).execute()
         recent_patients = recent_res.data if recent_res.data else []
     except Exception:
         recent_patients = []
@@ -495,7 +514,7 @@ def index():
     incoming_handoffs = []
     try:
         h_res = (
-            supabase.table('ayupulse_handoffs')
+            db.table('ayupulse_handoffs')
             .select('id, payload, created_at')
             .eq('clinic_uid', uid)
             .order('created_at', desc=True)
@@ -754,11 +773,12 @@ def index():
 @login_required
 def ayupulse_dismiss():
     """Dismisses an incoming AyuPulse handoff from the clinic inbox."""
+    db = get_db()
     uid = session['user_id']
     handoff_id = (request.form.get('handoff_id') or '').strip()
     if handoff_id:
         try:
-            supabase.table('ayupulse_handoffs').delete().eq('id', handoff_id).eq('clinic_uid', uid).execute()
+            db.table('ayupulse_handoffs').delete().eq('id', handoff_id).eq('clinic_uid', uid).execute()
         except Exception:
             pass
     return redirect(url_for('index'))
@@ -768,6 +788,7 @@ def ayupulse_dismiss():
 @login_required
 def ayupulse_import():
     """Receives full pre-visit triage payload from AyuPulse via handoff_id (or POST/GET) and imports into ClinicDesk."""
+    db = get_db()
     uid = session['user_id']
 
     def decode_field(val, is_b64):
@@ -794,12 +815,12 @@ def ayupulse_import():
         try:
             patient_id = None
             if phone:
-                existing = supabase.table('patients').select('id').eq('user_id', uid).eq('phone', phone).limit(1).execute()
+                existing = db.table('patients').select('id').eq('user_id', uid).eq('phone', phone).limit(1).execute()
                 if existing.data:
                     patient_id = existing.data[0]['id']
 
             if not patient_id:
-                p_ins = supabase.table('patients').insert({
+                p_ins = db.table('patients').insert({
                     "user_id": uid,
                     "name": name,
                     "phone": phone or f"AP-{int(time.time())}",
@@ -808,7 +829,7 @@ def ayupulse_import():
                 }).execute()
                 patient_id = p_ins.data[0]['id']
 
-            supabase.table('visits').insert({
+            db.table('visits').insert({
                 "user_id": uid,
                 "patient_id": patient_id,
                 "diagnosis_tags": diagnosis[:100],
@@ -818,7 +839,7 @@ def ayupulse_import():
             }).execute()
 
             if add_to_queue:
-                supabase.table('appointments').insert({
+                db.table('appointments').insert({
                     "user_id": uid,
                     "patient_id": patient_id,
                     "appointment_date": str(date.today()),
@@ -828,20 +849,23 @@ def ayupulse_import():
 
             if handoff_id:
                 try:
-                    supabase.table('ayupulse_handoffs').delete().eq('id', handoff_id).execute()
+                    db.table('ayupulse_handoffs').delete().eq('id', handoff_id).execute()
                 except Exception:
                     pass
 
             return redirect(url_for('patient_profile', patient_id=patient_id))
         except Exception as e:
-            return f"<div class='container mt-4'><div class='alert alert-danger'>Import error: {str(e)}</div><a href='/'>Back to Dashboard</a></div>", 500
+            err_text = str(e)
+            if "42501" in err_text or "row-level security" in err_text.lower():
+                err_text += " — Please log out of ClinicDesk and log back in once to refresh your session token."
+            return f"<div class='container mt-4'><div class='alert alert-danger'>Import error: {err_text}</div><a href='/'>Back to Dashboard</a></div>", 500
 
     # Step 1: Load full payload via handoff_id from Supabase
     handoff_id = (request.args.get('handoff_id') or request.form.get('handoff_id') or '').strip()
     data_src = {}
     if handoff_id:
         try:
-            h_res = supabase.table('ayupulse_handoffs').select('payload').eq('id', handoff_id).limit(1).execute()
+            h_res = db.table('ayupulse_handoffs').select('payload').eq('id', handoff_id).limit(1).execute()
             if h_res.data and isinstance(h_res.data[0].get('payload'), dict):
                 data_src = h_res.data[0]['payload']
         except Exception:
@@ -931,9 +955,10 @@ def revenue_reports():
     if session.get('role_mode', 'doctor') != 'doctor':
         return redirect(url_for('index', pin_error='1'))
 
+    db = get_db()
     uid = session['user_id']
     try:
-        res = supabase.table('visits').select('*, patients(id, name, phone)').eq('user_id', uid).order('created_at', desc=True).execute()
+        res = db.table('visits').select('*, patients(id, name, phone)').eq('user_id', uid).order('created_at', desc=True).execute()
         visits = res.data if res.data else []
     except Exception:
         visits = []
@@ -1043,6 +1068,7 @@ def revenue_reports():
 @app.route('/appointments', methods=['GET', 'POST'])
 @login_required
 def appointments_queue():
+    db = get_db()
     uid = session['user_id']
     selected_date = request.args.get('date', str(date.today()))
     error = None
@@ -1057,7 +1083,7 @@ def appointments_queue():
             time_slot = request.form.get('time_slot')
 
             try:
-                supabase.table('appointments').insert({
+                db.table('appointments').insert({
                     "user_id": uid,
                     "patient_id": int(patient_id),
                     "appointment_date": appt_date,
@@ -1072,14 +1098,14 @@ def appointments_queue():
             appt_id = request.form.get('appointment_id')
             new_status = request.form.get('status')
             try:
-                supabase.table('appointments').update({"status": new_status}).eq('id', appt_id).eq('user_id', uid).execute()
+                db.table('appointments').update({"status": new_status}).eq('id', appt_id).eq('user_id', uid).execute()
             except Exception as e:
                 error = f"Error updating status: {str(e)}"
 
-    p_res = supabase.table('patients').select('id, name, phone').eq('user_id', uid).order('name').execute()
+    p_res = db.table('patients').select('id, name, phone').eq('user_id', uid).order('name').execute()
     patients = p_res.data if p_res.data else []
 
-    a_res = supabase.table('appointments').select('*, patients(name, phone, id)').eq('user_id', uid).eq('appointment_date', selected_date).order('created_at').execute()
+    a_res = db.table('appointments').select('*, patients(name, phone, id)').eq('user_id', uid).eq('appointment_date', selected_date).order('created_at').execute()
     appointments = a_res.data if a_res.data else []
 
     patient_options = "".join([f'<option value="{p["id"]}">{p["name"]} ({p["phone"]})</option>' for p in patients])
@@ -1193,6 +1219,7 @@ def appointments_queue():
 @app.route('/register', methods=['GET', 'POST'])
 @login_required
 def register_patient():
+    db = get_db()
     uid = session['user_id']
     error = None
     if request.method == 'POST':
@@ -1213,7 +1240,7 @@ def register_patient():
             payload["abha_id"] = abha_id
 
         try:
-            response = supabase.table('patients').insert(payload).execute()
+            response = db.table('patients').insert(payload).execute()
 
             if response.data:
                 patient_id = response.data[0]['id']
@@ -1267,12 +1294,13 @@ def register_patient():
 @app.route('/search', methods=['GET'])
 @login_required
 def search_patients():
+    db = get_db()
     uid = session['user_id']
     query = request.args.get('q', '')
     patients = []
     if query:
         res = (
-            supabase.table('patients')
+            db.table('patients')
             .select('*')
             .eq('user_id', uid)
             .or_(f"name.ilike.%{query}%,phone.ilike.%{query}%,abha_id.ilike.%{query}%")
@@ -1280,7 +1308,7 @@ def search_patients():
         )
         patients = res.data
     else:
-        res = supabase.table('patients').select('*').eq('user_id', uid).order('created_at', desc=True).limit(15).execute()
+        res = db.table('patients').select('*').eq('user_id', uid).order('created_at', desc=True).limit(15).execute()
         patients = res.data
 
     rows = ""
@@ -1336,21 +1364,22 @@ def search_patients():
 @app.route('/patient/<int:patient_id>', methods=['GET', 'POST'])
 @login_required
 def patient_profile(patient_id):
+    db = get_db()
     uid = session['user_id']
     if request.method == 'POST' and request.form.get('action') == 'update_abha':
         new_abha = request.form.get('abha_id', '').strip()
         try:
-            supabase.table('patients').update({"abha_id": new_abha or None}).eq('id', patient_id).eq('user_id', uid).execute()
+            db.table('patients').update({"abha_id": new_abha or None}).eq('id', patient_id).eq('user_id', uid).execute()
         except Exception:
             pass
         return redirect(url_for('patient_profile', patient_id=patient_id))
 
-    p_res = supabase.table('patients').select('*').eq('id', patient_id).eq('user_id', uid).execute()
+    p_res = db.table('patients').select('*').eq('id', patient_id).eq('user_id', uid).execute()
     if not p_res.data:
         return "Patient not found or unauthorized access.", 404
     patient = p_res.data[0]
 
-    v_res = supabase.table('visits').select('*, prescriptions(*)').eq('patient_id', patient_id).order('created_at', desc=True).execute()
+    v_res = db.table('visits').select('*, prescriptions(*)').eq('patient_id', patient_id).order('created_at', desc=True).execute()
     visits = v_res.data or []
 
     today_str = str(date.today())
@@ -1452,12 +1481,13 @@ def patient_profile(patient_id):
 @login_required
 def add_report_to_visit(visit_id):
     """Attaches one or more extra scans/reports to an existing visit without duplicating the visit or fee."""
+    db = get_db()
     uid = session.get('user_id')
     if not uid:
         return redirect(url_for('logout'))
 
     try:
-        v_res = supabase.table('visits').select('*, patients(id, name)').eq('id', visit_id).eq('user_id', uid).execute()
+        v_res = db.table('visits').select('*, patients(id, name)').eq('id', visit_id).eq('user_id', uid).execute()
         if not v_res.data:
             return "Visit not found or unauthorized access.", 404
         visit = v_res.data[0]
@@ -1496,12 +1526,12 @@ def add_report_to_visit(visit_id):
                     filename = secure_filename(file.filename) or f"report_{idx}.jpg"
                     file_path = f"visit_{visit_id}_{int(time.time())}_{idx}_{filename}"
 
-                    supabase.storage.from_('prescriptions').upload(
+                    db.storage.from_('prescriptions').upload(
                         file_path, file_bytes, {"content-type": mime_type}
                     )
-                    public_url = supabase.storage.from_('prescriptions').get_public_url(file_path)
+                    public_url = db.storage.from_('prescriptions').get_public_url(file_path)
 
-                    supabase.table('prescriptions').insert({
+                    db.table('prescriptions').insert({
                         "visit_id": visit_id,
                         "prescription_url": public_url,
                         "document_type": document_type
@@ -1510,7 +1540,7 @@ def add_report_to_visit(visit_id):
                 if appended_notes:
                     joined_new = "\n\n".join(appended_notes)
                     updated_notes = f"{existing_notes}\n\n{joined_new}" if existing_notes else joined_new
-                    supabase.table('visits').update({
+                    db.table('visits').update({
                         "diagnosis_tags": existing_diag,
                         "notes": updated_notes
                     }).eq('id', visit_id).eq('user_id', uid).execute()
@@ -1644,16 +1674,17 @@ def public_patient_share(patient_id, token):
 @app.route('/patient/<int:patient_id>/print')
 @login_required
 def print_patient_summary(patient_id):
+    db = get_db()
     uid = session['user_id']
     clinic_name = session.get('clinic_name', 'ClinicDesk')
     doctor_name = session.get('doctor_name', 'Doctor')
 
-    p_res = supabase.table('patients').select('*').eq('id', patient_id).eq('user_id', uid).execute()
+    p_res = db.table('patients').select('*').eq('id', patient_id).eq('user_id', uid).execute()
     if not p_res.data:
         return "Patient not found", 404
     patient = p_res.data[0]
 
-    v_res = supabase.table('visits').select('*, prescriptions(*)').eq('patient_id', patient_id).order('created_at', desc=True).execute()
+    v_res = db.table('visits').select('*, prescriptions(*)').eq('patient_id', patient_id).order('created_at', desc=True).execute()
     visits = v_res.data
 
     visit_rows = ""
@@ -1729,19 +1760,20 @@ def print_patient_summary(patient_id):
 @app.route('/visit/new/<int:patient_id>', methods=['GET', 'POST'])
 @login_required
 def log_visit(patient_id):
+    db = get_db()
     uid = session.get('user_id')
     if not uid:
         return redirect(url_for('logout'))
 
     try:
-        p_res = supabase.table('patients').select('*').eq('id', patient_id).eq('user_id', uid).execute()
+        p_res = db.table('patients').select('*').eq('id', patient_id).eq('user_id', uid).execute()
         if not p_res.data:
             return "Patient not found or unauthorized access.", 404
         patient = p_res.data[0]
         patient_name = patient['name']
 
         # Check if this patient already has a visit logged today
-        v_check = supabase.table('visits').select('id, created_at, visit_date').eq('patient_id', patient_id).order('created_at', desc=True).limit(5).execute()
+        v_check = db.table('visits').select('id, created_at, visit_date').eq('patient_id', patient_id).order('created_at', desc=True).limit(5).execute()
         today_str = str(date.today())
         todays_visit = next(
             (v for v in (v_check.data or []) if str(v.get('visit_date', v.get('created_at', '')))[:10] == today_str),
@@ -1808,7 +1840,7 @@ def log_visit(patient_id):
                 combined_ai = "\n\n".join(ai_summaries)
                 notes = f"{notes}\n\n{combined_ai}" if notes else combined_ai
 
-            v_res = supabase.table('visits').insert({
+            v_res = db.table('visits').insert({
                 "user_id": uid,
                 "patient_id": patient_id,
                 "diagnosis_tags": diagnosis or "General Consultation",
@@ -1823,12 +1855,12 @@ def log_visit(patient_id):
                     filename = secure_filename(orig_name) or f"scan_{idx}.jpg"
                     file_path = f"visit_{visit_id}_{int(time.time())}_{idx}_{filename}"
 
-                    supabase.storage.from_('prescriptions').upload(
+                    db.storage.from_('prescriptions').upload(
                         file_path, file_bytes, {"content-type": mime_type}
                     )
-                    public_url = supabase.storage.from_('prescriptions').get_public_url(file_path)
+                    public_url = db.storage.from_('prescriptions').get_public_url(file_path)
 
-                    supabase.table('prescriptions').insert({
+                    db.table('prescriptions').insert({
                         "visit_id": visit_id,
                         "prescription_url": public_url,
                         "document_type": document_type
