@@ -251,6 +251,7 @@ def render_page(body_content, **kwargs):
 
     if 'user' in session and 'user_id' in session:
         revenue_nav = '<a href="/revenue" class="btn btn-outline-light btn-sm me-2">💰 Revenue Reports</a>' if role_mode == 'doctor' else ''
+        account_nav = '<a href="/account" class="btn btn-outline-light btn-sm me-2">⚙️ Account</a>' if role_mode == 'doctor' else ''
         mode_badge = (
             '<span class="badge bg-warning text-dark me-2">🖥️ Reception Mode</span>'
             if role_mode == 'reception'
@@ -263,6 +264,7 @@ def render_page(body_content, **kwargs):
             {revenue_nav}
             <a href="/search" class="btn btn-outline-light btn-sm me-2">Search Patients</a>
             <a href="/register" class="btn btn-outline-light btn-sm me-2">Register Patient</a>
+            {account_nav}
             <a href="/logout" class="btn btn-danger btn-sm">Logout</a>
         """
     else:
@@ -354,6 +356,7 @@ def signup():
                 user_id = str(response.user.id)
                 if response.session:
                     session['access_token'] = response.session.access_token
+                    session['refresh_token'] = response.session.refresh_token
                 db = get_db()
                 db.table('clinics').insert({
                     "user_id": user_id,
@@ -430,6 +433,7 @@ def signup():
 def login():
     error = None
     registered = request.args.get('registered')
+    reset = request.args.get('reset')
     next_url = request.args.get('next') or request.form.get('next') or ''
     if request.method == 'POST':
         email = request.form.get('email')
@@ -444,6 +448,7 @@ def login():
                 user_id = str(response.user.id)
                 if response.session:
                     session['access_token'] = response.session.access_token
+                    session['refresh_token'] = response.session.refresh_token
                 info = get_clinic_info(user_id)
                 session['user'] = email
                 session['user_id'] = user_id
@@ -462,6 +467,7 @@ def login():
             <div class="card shadow-sm p-4">
                 <h3 class="mb-3 text-primary text-center">🏥 ClinicDesk Login</h3>
                 {'<div class="alert alert-success">Clinic account created! Please log in below.</div>' if registered else ''}
+                {'<div class="alert alert-success">Password updated! Please log in with your new password.</div>' if reset else ''}
                 {f'<div class="alert alert-danger">{error}</div>' if error else ''}
                 <form method="POST">
                     <input type="hidden" name="next" value="{next_url}">
@@ -469,9 +475,12 @@ def login():
                         <label class="form-label">Doctor / Staff Email</label>
                         <input type="email" name="email" class="form-control" required>
                     </div>
-                    <div class="mb-3">
+                    <div class="mb-2">
                         <label class="form-label">Password</label>
                         <input type="password" name="password" class="form-control" required>
+                    </div>
+                    <div class="d-flex justify-content-end mb-3">
+                        <a href="/forgot-password" class="small text-decoration-none">Forgot Password?</a>
                     </div>
                     <button type="submit" class="btn btn-primary w-100">Login to ClinicDesk</button>
                 </form>
@@ -493,6 +502,218 @@ def logout():
     except Exception:
         pass
     return redirect(url_for('login'))
+
+
+@app.route('/forgot-password', methods=['GET', 'POST'])
+def forgot_password():
+    error = None
+    success = None
+    if request.method == 'POST':
+        email = (request.form.get('email') or '').strip()
+        try:
+            reset_redirect = url_for('reset_password', _external=True)
+            supabase.auth.reset_password_for_email(
+                email,
+                {"redirect_to": reset_redirect}
+            )
+            success = f"If an account exists for {email}, a password reset link has been sent. Please check your inbox and spam folder."
+        except Exception as e:
+            error = f"Unable to send reset link: {str(e)}"
+
+    body = f"""
+    <div class="row justify-content-center mt-5">
+        <div class="col-md-5">
+            <div class="card shadow-sm p-4">
+                <h3 class="mb-2 text-primary text-center">🔑 Reset Doctor Password</h3>
+                <p class="text-muted small text-center mb-3">Enter your registered clinic email to receive a password reset link.</p>
+                {f'<div class="alert alert-success">{success}</div>' if success else ''}
+                {f'<div class="alert alert-danger">{error}</div>' if error else ''}
+                <form method="POST">
+                    <div class="mb-3">
+                        <label class="form-label">Registered Login Email</label>
+                        <input type="email" name="email" class="form-control" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100">Send Password Reset Link</button>
+                </form>
+                <div class="text-center mt-3 small">
+                    <a href="/login">← Back to Login</a>
+                </div>
+            </div>
+        </div>
+    </div>
+    """
+    return render_page(body)
+
+
+@app.route('/reset-password', methods=['GET', 'POST'])
+def reset_password():
+    error = None
+    if request.method == 'POST':
+        access_token = (request.form.get('access_token') or '').strip()
+        refresh_token = (request.form.get('refresh_token') or '').strip()
+        new_password = request.form.get('new_password') or ''
+
+        if not access_token:
+            error = "Invalid or expired recovery link. Please request a new password reset."
+        elif len(new_password) < 6:
+            error = "Password must be at least 6 characters long."
+        else:
+            try:
+                supabase.auth.set_session(access_token, refresh_token)
+                supabase.auth.update_user({"password": new_password})
+                supabase.auth.sign_out()
+                return redirect(url_for('login', reset='1'))
+            except Exception as e:
+                error = f"Could not update password: {str(e)}"
+
+    body = f"""
+    <div class="row justify-content-center mt-5">
+        <div class="col-md-5">
+            <div class="card shadow-sm p-4">
+                <h3 class="mb-3 text-primary text-center">🔒 Set New Password</h3>
+                {f'<div class="alert alert-danger">{error}</div>' if error else ''}
+                <form method="POST">
+                    <input type="hidden" name="access_token" id="access_token">
+                    <input type="hidden" name="refresh_token" id="refresh_token">
+                    <div class="mb-3">
+                        <label class="form-label">New Password (Min 6 characters)</label>
+                        <input type="password" name="new_password" class="form-control" minlength="6" required>
+                    </div>
+                    <button type="submit" class="btn btn-success w-100">Save New Password</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    <script>
+        const hashParams = new URLSearchParams(window.location.hash.substring(1));
+        if (hashParams.get('access_token')) {{
+            document.getElementById('access_token').value = hashParams.get('access_token');
+            document.getElementById('refresh_token').value = hashParams.get('refresh_token') || '';
+        }}
+    </script>
+    """
+    return render_page(body)
+
+
+@app.route('/account', methods=['GET', 'POST'])
+@login_required
+def account_settings():
+    if session.get('role_mode', 'doctor') != 'doctor':
+        return redirect(url_for('index', pin_error='1'))
+
+    db = get_db()
+    uid = session['user_id']
+    current_email = session.get('user', '')
+    error = None
+    success = None
+
+    if request.method == 'POST':
+        action = request.form.get('action')
+        access_token = session.get('access_token', '')
+        refresh_token = session.get('refresh_token', '')
+
+        if action == 'update_email':
+            new_email = (request.form.get('new_email') or '').strip()
+            if not new_email or new_email == current_email:
+                error = "Please enter a different valid email address."
+            else:
+                try:
+                    supabase.auth.set_session(access_token, refresh_token)
+                    supabase.auth.update_user({"email": new_email})
+                    session['user'] = new_email
+                    success = f"Confirmation sent to {new_email}. Please click the verification link in both your old and new inboxes to complete the email change."
+                except Exception as e:
+                    error = f"Email update failed: {str(e)}"
+
+        elif action == 'update_password':
+            new_password = request.form.get('new_password') or ''
+            confirm_password = request.form.get('confirm_password') or ''
+            if len(new_password) < 6:
+                error = "New password must be at least 6 characters."
+            elif new_password != confirm_password:
+                error = "Passwords do not match."
+            else:
+                try:
+                    supabase.auth.set_session(access_token, refresh_token)
+                    supabase.auth.update_user({"password": new_password})
+                    success = "Password updated successfully!"
+                except Exception as e:
+                    error = f"Password update failed: {str(e)}"
+
+        elif action == 'update_profile':
+            clinic_name = (request.form.get('clinic_name') or '').strip()
+            doctor_name = (request.form.get('doctor_name') or '').strip()
+            if clinic_name and doctor_name:
+                try:
+                    db.table('clinics').update({
+                        "clinic_name": clinic_name,
+                        "doctor_name": doctor_name
+                    }).eq('user_id', uid).execute()
+                    session['clinic_name'] = clinic_name
+                    session['doctor_name'] = doctor_name
+                    success = "Clinic and doctor details updated!"
+                except Exception as e:
+                    error = f"Profile update failed: {str(e)}"
+
+    body = f"""
+    <div class="row justify-content-center">
+        <div class="col-md-7">
+            <h3 class="mb-3 text-primary">⚙️ Clinic & Account Settings</h3>
+            {f'<div class="alert alert-success">{success}</div>' if success else ''}
+            {f'<div class="alert alert-danger">{error}</div>' if error else ''}
+
+            <div class="card shadow-sm p-4 mb-4">
+                <h5 class="text-primary mb-3">🏥 Clinic & Doctor Display Details</h5>
+                <form method="POST">
+                    <input type="hidden" name="action" value="update_profile">
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Clinic Name</label>
+                            <input type="text" name="clinic_name" value="{session.get('clinic_name', '')}" class="form-control" required>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Doctor Name</label>
+                            <input type="text" name="doctor_name" value="{session.get('doctor_name', '')}" class="form-control" required>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-sm">Save Clinic Details</button>
+                </form>
+            </div>
+
+            <div class="card shadow-sm p-4 mb-4">
+                <h5 class="text-primary mb-3">📧 Change Login Email</h5>
+                <p class="small text-muted">Current Login Email: <strong>{session.get('user', '')}</strong></p>
+                <form method="POST">
+                    <input type="hidden" name="action" value="update_email">
+                    <div class="mb-3">
+                        <label class="form-label">New Email Address</label>
+                        <input type="email" name="new_email" class="form-control" placeholder="doctor@newemail.com" required>
+                    </div>
+                    <button type="submit" class="btn btn-outline-primary btn-sm">Update Login Email</button>
+                </form>
+            </div>
+
+            <div class="card shadow-sm p-4">
+                <h5 class="text-primary mb-3">🔒 Change Password</h5>
+                <form method="POST">
+                    <input type="hidden" name="action" value="update_password">
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">New Password (Min 6 chars)</label>
+                            <input type="password" name="new_password" class="form-control" minlength="6" required>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label class="form-label">Confirm New Password</label>
+                            <input type="password" name="confirm_password" class="form-control" minlength="6" required>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-outline-primary btn-sm">Change Password</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    """
+    return render_page(body)
 
 
 @app.route('/')
